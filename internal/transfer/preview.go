@@ -17,18 +17,18 @@ import (
 
 // PreviewShareInput 分享预览入参（来自Trae）
 type PreviewShareInput struct {
-	AccountID       int64  // 目标存储账号
-	ShareURL        string // 分享链接
-	PdirFID         string // 分享目录 fid（层级浏览用），空则从链接解析
-	MaxItems        int    // 单页最大条目数
-	TaskName        string // 任务名（用于 {TASKNAME} 变量）
-	Pattern         string // 命名正则（可为 $ 内置规则名）
-	Replace         string // 替换模板
-	SortIndex       int    // {I+} 序号基数
-	SavePath        string // 目标保存目录（用于已存在标注）
-	IgnoreExtension bool   // 忽略后缀判重
-	UpdateSubdir    string // 子目录同步正则（目录条目据此标注是否参与）
-	StartFID        string // 增量起始文件 fid
+	AccountID       int64  `json:"account_id"`
+	ShareURL        string `json:"share_url"`
+	PdirFID         string `json:"pdir_fid"`
+	MaxItems        int    `json:"max_items"`
+	TaskName        string `json:"task_name"`
+	Pattern         string `json:"pattern"`
+	Replace         string `json:"replace"`
+	SortIndex       int    `json:"sort_index"`
+	SavePath        string `json:"save_path"`
+	IgnoreExtension bool   `json:"ignore_extension"`
+	UpdateSubdir    string `json:"update_subdir"`
+	StartFID        string `json:"start_fid"`
 }
 
 // PreviewShareItem 预览条目（来自Trae）

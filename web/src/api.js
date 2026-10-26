@@ -86,6 +86,10 @@ export const ruleApi = {
   test: (d) => api.post('/api/rules/test', d),
 }
 
+export const cronApi = {
+  next: (expr, from) => api.get(`/api/cron/next?expr=${encodeURIComponent(expr)}${from ? '&from=' + encodeURIComponent(from) : ''}`),
+}
+
 export const settingsApi = {
   get: () => api.get('/api/settings'),
   save: (d) => api.put('/api/settings', d),

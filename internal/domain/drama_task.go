@@ -18,7 +18,8 @@ type DramaTask struct {
 	Replace                 string
 	IgnoreExtension         bool
 	RunWeek                 string // 逗号分隔的 1-7，留空表示每天都跑（来自Trae）
-	RunTime                 string // "HH:MM" 自动运行时刻（追剧定时）；空表示不限时刻
+	RunTime                 string // "HH:MM" 自动运行时刻（旧字段，兼容保留；新任务用 RunCron）
+	RunCron                 string // 5 字段 cron 表达式，例如 "0 */2 * * *" = 每 2 小时；旧数据留空由 RunWeek+RunTime 合成
 	EndDate                 string // YYYY-MM-DD
 	UpdateSubdir            string
 	UpdateSubdirResaveMode  string

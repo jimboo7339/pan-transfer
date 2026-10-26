@@ -4,6 +4,7 @@ import { ref, inject, onMounted } from 'vue'
 import TaskEdit from '../components/TaskEdit.vue'
 import TaskRuns from '../components/TaskRuns.vue'
 import { taskApi, accountApi, fmtTime } from '../api'
+import { cronToText } from '../cron'
 
 const toast = inject('toast')
 
@@ -76,9 +77,14 @@ async function removeTask(t) {
 function scheduleText(t) {
   const mode = t.run_mode || 'manual'
   if (mode === 'global') return '跟随全局'
-  if (mode === 'custom' && t.run_time) {
-    const w = t.run_week ? '每周' + t.run_week.split(',').filter(Boolean).map(d => '日一二三四五六'[d % 7]).join('、') : '每天'
-    return `${w} ${t.run_time}`
+  if (mode === 'custom') {
+    // 优先显示 cron 表达式的人性化文本
+    const cron = t.run_cron || (t.run_time ? (() => { const [h, m] = t.run_time.split(':'); return `${m||0} ${h||0} * * ${t.run_week||'*'}` })() : '')
+    if (cron) {
+      const human = cronToText(cron)
+      return human === cron ? cron : `${human}（${cron}）`
+    }
+    return '自定义'
   }
   return '手动'
 }

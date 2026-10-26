@@ -94,6 +94,9 @@ func (s *Server) routes() {
 	m.HandleFunc("DELETE /api/rules/{key}", s.wrap(s.handleRuleDelete))
 	m.HandleFunc("POST /api/rules/test", s.wrap(s.handleRuleTest))
 
+	// 调度辅助
+	m.HandleFunc("GET /api/cron/next", s.wrap(s.handleCronNext))
+
 	// 设置与通知
 	m.HandleFunc("GET /api/settings", s.wrap(s.handleSettingsGet))
 	m.HandleFunc("PUT /api/settings", s.wrap(s.handleSettingsPut))
@@ -571,6 +574,7 @@ type taskIn struct {
 	SortIndex       int      `json:"sort_index"`
 	SkipHistory     string   `json:"skip_history"`
 	RunMode         string   `json:"run_mode"` // manual/global/custom
+	RunCron         string   `json:"run_cron"` // 5 字段 cron 表达式
 	Status          string   `json:"status"`
 }
 
@@ -591,6 +595,7 @@ func (in *taskIn) toTask() *domain.DramaTask {
 		SortIndex:       in.SortIndex,
 		SkipHistory:     in.SkipHistory,
 		RunMode:         in.RunMode,
+		RunCron:         in.RunCron,
 		Status:          in.Status,
 	}
 	transfer.SetLinks(t, in.Links)
@@ -615,6 +620,7 @@ func taskOut(t *domain.DramaTask) map[string]any {
 		"sort_index":       t.SortIndex,
 		"skip_history":     t.SkipHistory,
 		"run_mode":         transfer.EffectiveRunMode(t),
+		"run_cron":         t.RunCron,
 		"status":           t.Status,
 		"last_run_at":      t.LastRunAt,
 		"last_run_status":  t.LastRunStatus,
@@ -860,6 +866,24 @@ func (s *Server) handleRuleTest(w http.ResponseWriter, r *http.Request) error {
 
 // ---------- 设置与通知 ----------
 
+// handleCronNext 返回 cron 表达式下次触发时间。
+func (s *Server) handleCronNext(w http.ResponseWriter, r *http.Request) error {
+	expr := strings.TrimSpace(r.URL.Query().Get("expr"))
+	if expr == "" {
+		return domain.Errorf(domain.CodeValidation, "缺少 expr 参数")
+	}
+	if err := transfer.ParseCron(expr); err != nil {
+		return domain.Errorf(domain.CodeValidation, "cron 表达式无效：%v", err)
+	}
+	from := r.URL.Query().Get("from")
+	next, err := transfer.NextCronRun(expr, from)
+	if err != nil {
+		return err
+	}
+	respond(w, map[string]string{"expr": expr, "next_run": next})
+	return nil
+}
+
 func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 	channels, err := s.deps.Notify.ListChannels(ctx)
@@ -876,6 +900,7 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) error
 	}
 	schedTime, _ := s.deps.Store.GetSetting(ctx, "schedule_time")
 	schedWeek, _ := s.deps.Store.GetSetting(ctx, "schedule_week")
+	schedCron, _ := s.deps.Store.GetSetting(ctx, "schedule_cron")
 	pwd, _ := s.deps.Store.GetSetting(ctx, "auth_password")
 	respond(w, map[string]any{
 		"notify_channels":     channels,
@@ -883,6 +908,7 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) error
 		"schedule_enabled":    schedEnabled,
 		"schedule_time":       schedTime,
 		"schedule_week":       schedWeek,
+		"schedule_cron":       schedCron,
 		"auth_enabled":        strings.TrimSpace(pwd) != "",
 	})
 	return nil
@@ -895,6 +921,7 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) error
 		ScheduleEnabled   *string           `json:"schedule_enabled"`
 		ScheduleTime      *string           `json:"schedule_time"`
 		ScheduleWeek      *string           `json:"schedule_week"`
+		ScheduleCron      *string           `json:"schedule_cron"`
 		Password          *string           `json:"password"`
 	}
 	if err := decode(r, &in); err != nil {
@@ -946,6 +973,17 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) error
 			}
 		}
 		if err := s.deps.Store.SetSetting(ctx, "schedule_week", v); err != nil {
+			return err
+		}
+	}
+	if in.ScheduleCron != nil {
+		v := strings.TrimSpace(*in.ScheduleCron)
+		if v != "" {
+			if err := transfer.ParseCron(v); err != nil {
+				return domain.Errorf(domain.CodeValidation, "cron 表达式无效：%v", err)
+			}
+		}
+		if err := s.deps.Store.SetSetting(ctx, "schedule_cron", v); err != nil {
 			return err
 		}
 	}

@@ -15,6 +15,7 @@ const trail = ref([]) // [{fid, name}]
 const total = ref(0)
 const truncated = ref(false)
 const curDirName = ref('根目录')
+const loadError = ref('')
 
 // 预览参数（父组件通过 open 传入）
 let params = null
@@ -30,6 +31,7 @@ defineExpose({ open })
 
 async function load(fid) {
   loading.value = true
+  loadError.value = ''
   try {
     const res = await shareApi.preview({ ...params, pdir_fid: fid, max_items: 500 })
     items.value = res.items || []
@@ -39,6 +41,7 @@ async function load(fid) {
     truncated.value = res.truncated
   } catch (e) {
     toast(e.message, 'error')
+    loadError.value = e.message
     items.value = []
   } finally {
     loading.value = false
@@ -95,7 +98,18 @@ function useCurrentFolder() {
           </div>
 
           <div v-if="loading" class="loading-block"><span class="spinner"></span> 加载中…</div>
-          <div v-else-if="!items.length" class="empty">
+          <div v-if="loadError" class="card card-pad" style="border-color: var(--danger); background: var(--danger-soft)">
+            <div class="flex" style="justify-content: space-between; align-items: flex-start">
+              <div>
+                <div style="font-weight: 600; color: var(--danger); font-size: 13px">⚠ 预览失败</div>
+                <div class="mono mt-8" style="font-size: 12px; color: var(--text-2); word-break: break-all">{{ loadError }}</div>
+                <div class="field-hint mt-8" style="margin-top: 10px">
+                  排查顺序：① 账号 Cookie / Token 是否有效（在「网盘账号」页点「测试连接」）；② 分享链接是否失效 / 是否被删除；③ 提取码是否正确（如需提取码在 URL 里带 <code class="mono">?pwd=xxxx</code>）
+                </div>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="!items.length && !loadError" class="empty">
             <div class="empty-title">此目录没有文件</div>
           </div>
           <div v-else class="table-wrap">

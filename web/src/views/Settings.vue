@@ -1,9 +1,10 @@
 <script setup>
 // 设置：通知渠道管理 + 全局开关 + 访问密码。
-import { ref, reactive, inject, onMounted } from 'vue'
 import Modal from '../components/Modal.vue'
 import WeekPicker from '../components/WeekPicker.vue'
-import { settingsApi, notifyApi, authApi } from '../api'
+import { settingsApi, notifyApi, authApi, cronApi } from '../api'
+import { CRON_PRESETS, cronToText } from '../cron'
+import { ref, reactive, inject, onMounted, watch } from 'vue'
 
 const toast = inject('toast')
 const session = inject('session')
@@ -17,7 +18,18 @@ const settings = reactive({
   schedule_enabled: 'on',
   schedule_time: '',
   schedule_week: '',
+  schedule_cron: '',
   auth_enabled: false,
+})
+
+const globalCronNext = ref('')
+const globalCronError = ref('')
+watch(() => settings.schedule_cron, (v) => {
+  globalCronNext.value = ''; globalCronError.value = ''
+  if (!v || !v.trim()) return
+  const expr = v.trim()
+  if (expr.split(/\s+/).length !== 5) { globalCronError.value = '需要 5 个字段：分 时 日 月 周'; return }
+  cronApi.next(expr).then(r => { globalCronNext.value = r.next_run }).catch(e => { globalCronError.value = e.message })
 })
 
 const channelTypes = [
@@ -130,12 +142,13 @@ async function persist(patch) {
 }
 
 function saveSchedule() {
-  if (settings.schedule_enabled === 'on' && !settings.schedule_time) {
-    toast('全局调度开启时需要设置运行时间', 'error')
+  if (settings.schedule_enabled === 'on' && !settings.schedule_cron.trim() && !settings.schedule_time) {
+    toast('全局调度开启时需要填写 cron 表达式或运行时间', 'error')
     return
   }
   persist({
     schedule_enabled: settings.schedule_enabled,
+    schedule_cron: settings.schedule_cron,
     schedule_time: settings.schedule_time,
     schedule_week: settings.schedule_week,
   })
@@ -218,16 +231,31 @@ async function clearPassword() {
             <span class="page-desc" style="margin: 0">{{ settings.schedule_enabled === 'off' ? '已关闭：所有任务仅手动运行' : '开启中：到点自动运行「跟随全局」的任务' }}</span>
           </div>
         </div>
-        <div class="form-row" style="max-width: 560px">
-          <div class="field">
-            <div class="field-label">运行时间</div>
-            <input class="input" type="time" v-model="settings.schedule_time" :disabled="settings.schedule_enabled === 'off'" />
+        <div class="field" style="max-width: 560px">
+          <div class="field-label">Cron 表达式（分 时 日 月 周）</div>
+          <input class="input mono" v-model="settings.schedule_cron" placeholder="例如 0 */2 * * *  = 每 2 小时" :disabled="settings.schedule_enabled === 'off'" />
+          <div class="flex mt-8" style="flex-wrap: wrap; gap: 6px">
+            <button v-for="p in CRON_PRESETS" :key="p.value" class="btn btn-sm" :disabled="settings.schedule_enabled === 'off'" @click="settings.schedule_cron = p.value">{{ p.label }}</button>
           </div>
-          <div class="field">
-            <div class="field-label">更新日（不选 = 每天）</div>
-            <WeekPicker v-model="settings.schedule_week" />
-          </div>
+          <div v-if="globalCronError" class="field-hint text-danger" style="margin-top: 6px">{{ globalCronError }}</div>
+          <div v-else-if="globalCronNext" class="field-hint" style="margin-top: 6px">下次执行：{{ globalCronNext }} · {{ cronToText(settings.schedule_cron) }}</div>
+          <div v-else-if="settings.schedule_cron" class="field-hint text-warn" style="margin-top: 6px">表达式格式有误，暂无法计算下次执行时间。</div>
+          <div class="field-hint" style="margin-top: 6px">示例：每 2 小时 <code class="mono">0 */2 * * *</code>；每天 08:00 <code class="mono">0 8 * * *</code>；周一到五 20:30 <code class="mono">30 20 * * 1-5</code></div>
         </div>
+        <details class="mt-8" style="max-width: 560px">
+          <summary style="cursor: pointer; font-size: 12.5px; color: var(--text-3); user-select: none">旧版配置（运行时间 + 更新日，兼容保留）</summary>
+          <div class="form-row mt-8">
+            <div class="field">
+              <div class="field-label">运行时间</div>
+              <input class="input" type="time" v-model="settings.schedule_time" :disabled="settings.schedule_enabled === 'off'" />
+            </div>
+            <div class="field">
+              <div class="field-label">更新日（不选 = 每天）</div>
+              <WeekPicker v-model="settings.schedule_week" />
+            </div>
+          </div>
+          <div class="field-hint">填了「Cron 表达式」时以它为准；否则回退到这里的运行时间 + 更新日。Cron 优先。</div>
+        </details>
         <button class="btn btn-primary" :disabled="saving" @click="saveSchedule">保存调度配置</button>
         <div class="field-hint mt-8">到点后有 1–3 分钟随机延迟；截止日期在任务里单独配置。</div>
       </div>

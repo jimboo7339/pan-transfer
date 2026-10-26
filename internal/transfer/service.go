@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,7 +15,33 @@ import (
 	"pan-transfer/internal/domain"
 	"pan-transfer/internal/driver"
 	"pan-transfer/internal/store"
+
+	"github.com/robfig/cron/v3"
 )
+
+// cronParser 支持标准 5 字段 cron（分 时 日 月 周），用于任务与全局调度的表达式校验。
+var cronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+
+// ParseCron 校验 cron 表达式合法性。
+func ParseCron(expr string) error {
+	_, err := cronParser.Parse(strings.TrimSpace(expr))
+	return err
+}
+
+// NextCronRun 返回 cron 表达式下次触发时间（from 起）。
+func NextCronRun(expr, from string) (string, error) {
+	start := time.Now()
+	if strings.TrimSpace(from) != "" {
+		if t, err := time.Parse(time.RFC3339, from); err == nil {
+			start = t
+		}
+	}
+	s, err := cronParser.Parse(strings.TrimSpace(expr))
+	if err != nil {
+		return "", fmt.Errorf("无效 cron 表达式：%v", err)
+	}
+	return s.Next(start).Format("2006-01-02 15:04"), nil
+}
 
 // Executor 是账号驱动执行器的最小接口约束（由 accounts.Manager 实现）。
 type Executor interface {
@@ -163,45 +190,37 @@ func (s *Service) Start() {
 	}()
 }
 
-// sweep 扫描到期任务并触发。
-// 任务调度三态：manual=仅手动；custom=任务自己的 RunWeek/RunTime；global=用设置页的全局调度。
+// sweep 扫描到期任务并触发（cron 匹配，支持 */N 步长、周几组合等标准 5 字段表达式）。
 func (s *Service) sweep() {
 	ctx := s.appCtx
 	enabled, _ := s.st.GetSetting(ctx, "schedule_enabled")
 	if enabled == "off" {
 		return
 	}
-	globalTime, _ := s.st.GetSetting(ctx, "schedule_time")
-
 	tasks, err := s.st.ListActiveTasks(ctx)
 	if err != nil {
 		s.log.Warn("调度扫描失败", "err", err)
 		return
 	}
 	now := time.Now()
+	currentMinute := now.Truncate(time.Minute)
 	for _, t := range tasks {
-		mode := EffectiveRunMode(t)
-		var clock string
-		switch mode {
-		case "global":
-			if strings.TrimSpace(globalTime) == "" {
-				continue // 全局未配置运行时间 = 全局仅手动
-			}
-			clock = strings.TrimSpace(globalTime)
-		case "custom":
-			clock = strings.TrimSpace(t.RunTime)
-			if clock == "" {
-				continue
-			}
-		default: // manual
+		expr := s.effectiveCron(ctx, t)
+		if strings.TrimSpace(expr) == "" {
 			continue
 		}
-		if now.Format("15:04") != clock {
+		sched, err := cronParser.Parse(expr)
+		if err != nil {
+			s.log.Warn("任务 cron 表达式无效，跳过", "task", t.ID, "expr", expr, "err", err)
+			continue
+		}
+		// 命中判定：上一分钟开始的下一次触发正好落在当前分钟。
+		if !sched.Next(currentMinute.Add(-time.Second)).Equal(currentMinute) {
 			continue
 		}
 		// 同分钟窗口防重复触发
 		s.schedMu.Lock()
-		window := now.Format("2006-01-02 15:04")
+		window := currentMinute.Format("2006-01-02 15:04")
 		if s.lastTrigger[t.ID] == window {
 			s.schedMu.Unlock()
 			continue
@@ -209,7 +228,6 @@ func (s *Service) sweep() {
 		s.lastTrigger[t.ID] = window
 		s.schedMu.Unlock()
 
-		// 轻微随机延迟，避免整点并发轰炸上游
 		go func(taskID int64) {
 			select {
 			case <-ctx.Done():
@@ -223,13 +241,66 @@ func (s *Service) sweep() {
 	}
 }
 
+// effectiveCron 计算任务应执行的 cron 表达式（可能返回空表示手动/停用）。
+func (s *Service) effectiveCron(ctx context.Context, t *domain.DramaTask) string {
+	switch EffectiveRunMode(t) {
+	case "manual":
+		return ""
+	case "global":
+		return s.GlobalCron(ctx)
+	default: // custom
+		if strings.TrimSpace(t.RunCron) != "" {
+			return strings.TrimSpace(t.RunCron)
+		}
+		// 兼容旧数据：RunWeek + RunTime 合成 cron
+		if strings.TrimSpace(t.RunTime) != "" {
+			parts := strings.SplitN(t.RunTime, ":", 2)
+			hh, _ := strconv.Atoi(parts[0])
+			mm := 0
+			if len(parts) > 1 {
+				mm, _ = strconv.Atoi(parts[1])
+			}
+			dow := strings.TrimSpace(t.RunWeek)
+			if dow == "" {
+				dow = "*"
+			}
+			return fmt.Sprintf("%d %d * * %s", mm, hh, dow)
+		}
+		return ""
+	}
+}
+
+// GlobalCron 返回全局调度 cron（设置页 schedule_cron；旧字段 schedule_time+week 合成）。
+func (s *Service) GlobalCron(ctx context.Context) string {
+	if c, _ := s.st.GetSetting(ctx, "schedule_cron"); strings.TrimSpace(c) != "" {
+		return strings.TrimSpace(c)
+	}
+	timeStr, _ := s.st.GetSetting(ctx, "schedule_time")
+	week, _ := s.st.GetSetting(ctx, "schedule_week")
+	timeStr = strings.TrimSpace(timeStr)
+	if timeStr == "" {
+		return ""
+	}
+	parts := strings.SplitN(timeStr, ":", 2)
+	hh, _ := strconv.Atoi(parts[0])
+	mm := 0
+	if len(parts) > 1 {
+		mm, _ = strconv.Atoi(parts[1])
+	}
+	dow := strings.TrimSpace(week)
+	if dow == "" {
+		dow = "*"
+	}
+	return fmt.Sprintf("%d %d * * %s", mm, hh, dow)
+}
+
 // EffectiveRunMode 返回任务的实际调度模式（兼容 v0.1 无 run_mode 的旧数据）。
 func EffectiveRunMode(t *domain.DramaTask) string {
 	switch strings.TrimSpace(t.RunMode) {
 	case "global", "custom", "manual":
 		return strings.TrimSpace(t.RunMode)
 	}
-	if strings.TrimSpace(t.RunTime) != "" {
+	if strings.TrimSpace(t.RunCron) != "" || strings.TrimSpace(t.RunTime) != "" {
 		return "custom"
 	}
 	return "manual"
