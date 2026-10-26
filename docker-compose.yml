@@ -1,0 +1,13 @@
+# PanTransfer NAS / 服务器部署
+# 用法: docker compose up -d   （镜像名换成你自己的，见 README 部署章节）
+services:
+  pan-transfer:
+    image: ghcr.io/OWNER/pan-transfer:latest   # ← 改成你的 ghcr 用户名/仓库名，或本地导入的镜像 tag
+    container_name: pan-transfer
+    restart: unless-stopped
+    ports:
+      - "8935:8935"          # 左边可改；右边 8935 是容器内端口不要动
+    environment:
+      - TZ=Asia/Shanghai     # 追剧定时按此时区调度，务必保持
+    volumes:
+      - ./pan-transfer/data:/app/data   # SQLite 与全部状态都在这里，升级镜像不丢数据

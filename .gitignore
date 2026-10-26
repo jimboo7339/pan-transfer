@@ -1,0 +1,10 @@
+# 运行数据与本地产物
+data/
+data-demo/
+data-test/
+*.exe
+*.log
+capture.txt
+
+# 前端
+web/node_modules/

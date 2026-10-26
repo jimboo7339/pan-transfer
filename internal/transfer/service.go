@@ -1,0 +1,522 @@
+// Package transfer 追剧转存服务层：任务 CRUD + 定时调度 + 单次执行 + 分享预览。
+// 执行器与预览逻辑移植自 CASX（经 LitePan 适配），本文件只做编排。
+package transfer
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
+
+	"pan-transfer/internal/domain"
+	"pan-transfer/internal/driver"
+	"pan-transfer/internal/store"
+)
+
+// Executor 是账号驱动执行器的最小接口约束（由 accounts.Manager 实现）。
+type Executor interface {
+	Run(context.Context, int64, func(driver.Driver) error) error
+}
+
+// Notifier 任务结果通知接口（由 notify.Sender 适配）。
+type Notifier interface {
+	Send(ctx context.Context, title, message string) []string
+}
+
+// Options 服务构造参数。
+type Options struct {
+	Exec     Executor
+	Store    *store.Store
+	Log      *slog.Logger
+	Notify   Notifier
+}
+
+// Service 追剧转存服务。
+type Service struct {
+	exec  Executor
+	st    *store.Store
+	log   *slog.Logger
+	notif Notifier
+
+	mu      sync.Mutex
+	running map[int64]struct{} // 正在执行的任务 ID，防并发重入
+
+	schedMu     sync.Mutex
+	lastTrigger map[int64]string // 任务 ID -> 上次触发的分钟窗口（防同分钟重复触发）
+	appCtx      context.Context
+	cancel      context.CancelFunc
+}
+
+// New 构造服务。
+func New(opts Options) *Service {
+	log := opts.Log
+	if log == nil {
+		log = slog.Default()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Service{
+		exec:        opts.Exec,
+		st:          opts.Store,
+		log:         log,
+		notif:       opts.Notify,
+		running:     map[int64]struct{}{},
+		lastTrigger: map[int64]string{},
+		appCtx:      ctx,
+		cancel:      cancel,
+	}
+}
+
+// Close 停止调度循环。
+func (s *Service) Close() { s.cancel() }
+
+// ---------- 链接辅助 ----------
+
+// LinksOf 返回任务的多源链接列表（有序去重）；空列表回退 ShareURL。
+func LinksOf(t *domain.DramaTask) []string {
+	var links []string
+	if strings.TrimSpace(t.ShareLinks) != "" {
+		_ = json.Unmarshal([]byte(t.ShareLinks), &links)
+	}
+	out := make([]string, 0, len(links))
+	seen := map[string]struct{}{}
+	for _, l := range links {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		if _, ok := seen[l]; ok {
+			continue
+		}
+		seen[l] = struct{}{}
+		out = append(out, l)
+	}
+	if len(out) == 0 && strings.TrimSpace(t.ShareURL) != "" {
+		out = append(out, strings.TrimSpace(t.ShareURL))
+	}
+	return out
+}
+
+// SetLinks 把链接列表序列化回任务（首个链接同时写入 ShareURL 便于展示）。
+func SetLinks(t *domain.DramaTask, links []string) {
+	clean := make([]string, 0, len(links))
+	seen := map[string]struct{}{}
+	for _, l := range links {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		if _, ok := seen[l]; ok {
+			continue
+		}
+		seen[l] = struct{}{}
+		clean = append(clean, l)
+	}
+	raw, _ := json.Marshal(clean)
+	t.ShareLinks = string(raw)
+	if len(clean) > 0 {
+		t.ShareURL = clean[0]
+	} else {
+		t.ShareURL = ""
+	}
+}
+
+// ---------- 正则规则 ----------
+
+// enabledRegexOverrides 读取启用中的命名正则规则，转为执行器覆盖表。
+func (s *Service) enabledRegexOverrides(ctx context.Context) (map[string]MagicRegexEntry, error) {
+	rules, err := s.st.ListRules(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]MagicRegexEntry{}
+	for _, r := range rules {
+		if !r.Enabled {
+			continue
+		}
+		key := strings.TrimSpace(r.Key)
+		if !strings.HasPrefix(key, "$") {
+			continue
+		}
+		out[key] = MagicRegexEntry{Pattern: r.Pattern, Replace: r.Replace}
+	}
+	return out, nil
+}
+
+// ---------- 调度 ----------
+
+// Start 启动定时调度循环（30s 粒度；命中任务 RunTime 时刻触发）。
+func (s *Service) Start() {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.appCtx.Done():
+				return
+			case <-ticker.C:
+				s.sweep()
+			}
+		}
+	}()
+}
+
+// sweep 扫描到期任务并触发。
+// 任务调度三态：manual=仅手动；custom=任务自己的 RunWeek/RunTime；global=用设置页的全局调度。
+func (s *Service) sweep() {
+	ctx := s.appCtx
+	enabled, _ := s.st.GetSetting(ctx, "schedule_enabled")
+	if enabled == "off" {
+		return
+	}
+	globalTime, _ := s.st.GetSetting(ctx, "schedule_time")
+
+	tasks, err := s.st.ListActiveTasks(ctx)
+	if err != nil {
+		s.log.Warn("调度扫描失败", "err", err)
+		return
+	}
+	now := time.Now()
+	for _, t := range tasks {
+		mode := EffectiveRunMode(t)
+		var clock string
+		switch mode {
+		case "global":
+			if strings.TrimSpace(globalTime) == "" {
+				continue // 全局未配置运行时间 = 全局仅手动
+			}
+			clock = strings.TrimSpace(globalTime)
+		case "custom":
+			clock = strings.TrimSpace(t.RunTime)
+			if clock == "" {
+				continue
+			}
+		default: // manual
+			continue
+		}
+		if now.Format("15:04") != clock {
+			continue
+		}
+		// 同分钟窗口防重复触发
+		s.schedMu.Lock()
+		window := now.Format("2006-01-02 15:04")
+		if s.lastTrigger[t.ID] == window {
+			s.schedMu.Unlock()
+			continue
+		}
+		s.lastTrigger[t.ID] = window
+		s.schedMu.Unlock()
+
+		// 轻微随机延迟，避免整点并发轰炸上游
+		go func(taskID int64) {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Duration(1+now.UnixNano()%180) * time.Second):
+			}
+			if _, err := s.RunTask(ctx, taskID, "schedule"); err != nil {
+				s.log.Warn("定时任务执行失败", "task", taskID, "err", err)
+			}
+		}(t.ID)
+	}
+}
+
+// EffectiveRunMode 返回任务的实际调度模式（兼容 v0.1 无 run_mode 的旧数据）。
+func EffectiveRunMode(t *domain.DramaTask) string {
+	switch strings.TrimSpace(t.RunMode) {
+	case "global", "custom", "manual":
+		return strings.TrimSpace(t.RunMode)
+	}
+	if strings.TrimSpace(t.RunTime) != "" {
+		return "custom"
+	}
+	return "manual"
+}
+
+// skipHistoryEnabled 判断任务本次运行是否启用转存历史去重。
+func (s *Service) skipHistoryEnabled(ctx context.Context, t *domain.DramaTask) bool {
+	mode := strings.TrimSpace(t.SkipHistory)
+	if mode == "" || mode == "global" {
+		v, err := s.st.GetSetting(ctx, "skip_history_global")
+		mode = strings.TrimSpace(v)
+		if err != nil || mode == "" {
+			mode = "on"
+		}
+	}
+	return mode == "on"
+}
+
+// ---------- 执行 ----------
+
+// RunTaskNow 手动执行任务（忽略运行星期，但任务暂停时仍拒绝）。
+func (s *Service) RunTaskNow(ctx context.Context, taskID int64) (*RunResult, error) {
+	return s.RunTask(ctx, taskID, "manual")
+}
+
+// RunResult 一次任务执行的结果汇总。
+type RunResult struct {
+	TaskID        int64  `json:"task_id"`
+	Status        string `json:"status"` // success/failed/partial
+	TransferCount int    `json:"transfer_count"`
+	LinksUsed     int    `json:"links_used"`
+	LinksFailed   int    `json:"links_failed"`
+	Message       string `json:"message"`
+	TreeSummary   string `json:"tree_summary"`
+}
+
+// RunTask 执行任务：遍历多源链接，逐条转存（互去重），汇总结果并通知。
+func (s *Service) RunTask(ctx context.Context, taskID int64, trigger string) (*RunResult, error) {
+	t, err := s.st.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if t.Status == "paused" {
+		return nil, domain.Errorf(domain.CodeValidation, "任务已暂停，请先启用")
+	}
+
+	// 并发重入保护
+	s.mu.Lock()
+	if _, busy := s.running[taskID]; busy {
+		s.mu.Unlock()
+		return nil, domain.Errorf(domain.CodeValidation, "任务正在运行中")
+	}
+	s.running[taskID] = struct{}{}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.running, taskID)
+		s.mu.Unlock()
+	}()
+
+	links := LinksOf(t)
+	if len(links) == 0 {
+		return nil, domain.Errorf(domain.CodeValidation, "任务没有配置分享链接")
+	}
+
+	// 定时触发时校验运行星期与截止日期（手动触发不校验星期）
+	if trigger == "schedule" {
+		if EffectiveRunMode(t) == "global" {
+			if w, _ := s.st.GetSetting(ctx, "schedule_week"); strings.TrimSpace(w) != "" {
+				t.RunWeek = strings.TrimSpace(w) // 仅影响本次校验，不落库
+			}
+		}
+		if err := ValidateSchedule(t, false, time.Now()); err != nil {
+			return &RunResult{TaskID: taskID, Status: "skipped", Message: "不在运行窗口内"}, nil
+		}
+	}
+
+	overrides, err := s.enabledRegexOverrides(ctx)
+	if err != nil {
+		return nil, err
+	}
+	useHistory := s.skipHistoryEnabled(ctx, t)
+
+	res := &RunResult{TaskID: taskID}
+	var allNames []string
+	var trees []string
+	var lastErr error
+
+	for _, link := range links {
+		select {
+		case <-ctx.Done():
+			return res, ctx.Err()
+		default:
+		}
+		runID, err := s.st.CreateRun(ctx, taskID, link)
+		if err != nil {
+			return nil, err
+		}
+		tree, names, rerr := s.runOneLink(ctx, t, link, overrides, useHistory, allNames)
+		status := "success"
+		msg := ""
+		if rerr != nil {
+			status = "failed"
+			msg = rerr.Error()
+			lastErr = rerr
+			res.LinksFailed++
+		} else {
+			res.LinksUsed++
+			res.TransferCount += len(names)
+			allNames = append(allNames, names...)
+		}
+		if tree != "" {
+			trees = append(trees, tree)
+		}
+		_ = s.st.FinishRun(ctx, runID, status, msg, tree, len(names))
+	}
+
+	// 汇总任务状态
+	nowStr := time.Now().Format("2006-01-02 15:04:05")
+	if res.LinksFailed == 0 {
+		res.Status = "success"
+		res.Message = fmt.Sprintf("转存 %d 个文件（%d 条链接）", res.TransferCount, res.LinksUsed)
+	} else if res.LinksUsed > 0 {
+		res.Status = "partial"
+		res.Message = fmt.Sprintf("部分成功：%d 条链接转存 %d 个文件，%d 条失效", res.LinksUsed, res.TransferCount, res.LinksFailed)
+	} else {
+		res.Status = "failed"
+		if lastErr != nil {
+			res.Message = "全部链接失败：" + lastErr.Error()
+		} else {
+			res.Message = "全部链接失败"
+		}
+	}
+	res.TreeSummary = strings.Join(trees, "\n")
+	_ = s.st.UpdateTaskRunState(ctx, taskID, nowStr, res.Status, res.Message, res.TreeSummary)
+
+	// 通知
+	if s.notif != nil {
+		title := fmt.Sprintf("✅ 转存完成：%s", t.TaskName)
+		if res.Status == "failed" {
+			title = fmt.Sprintf("❌ 转存失败：%s", t.TaskName)
+		} else if res.Status == "partial" {
+			title = fmt.Sprintf("⚠️ 转存部分成功：%s", t.TaskName)
+		}
+		var b strings.Builder
+		b.WriteString(res.Message)
+		if len(allNames) > 0 {
+			b.WriteString("\n本次新转存：")
+			for i, n := range allNames {
+				if i >= 10 {
+					b.WriteString(fmt.Sprintf("\n…等共 %d 个文件", len(allNames)))
+					break
+				}
+				b.WriteString("\n· " + n)
+			}
+		}
+		go s.notif.Send(context.Background(), title, b.String())
+	}
+	return res, nil
+}
+
+// runOneLink 对单条分享链接执行一次转存。prevNames 是本运行中前面链接已转存的
+// 文件名，用于跨链接去重。
+func (s *Service) runOneLink(ctx context.Context, t *domain.DramaTask, link string, overrides map[string]MagicRegexEntry, useHistory bool, prevNames []string) (string, []string, error) {
+	// 转存历史（按名去重）
+	var skip []string
+	if useHistory {
+		names, err := s.st.SavedNormNames(ctx, t.ID)
+		if err != nil {
+			return "", nil, err
+		}
+		skip = append(skip, names...)
+	}
+	skip = append(skip, prevNames...)
+
+	var tree string
+	var names []string
+	err := s.exec.Run(ctx, t.AccountID, func(drv driver.Driver) error {
+		taskCopy := *t
+		taskCopy.ShareURL = link
+		ex, err := NewDramaExecutor(drv, &taskCopy, overrides)
+		if err != nil {
+			return err
+		}
+		ex.ExtraSkipNames = skip
+		tree, err = ex.Execute(ctx)
+		names = ex.TransferredNames()
+		return err
+	})
+	if err != nil {
+		return tree, nil, err
+	}
+	// 记录转存历史
+	if len(names) > 0 {
+		items := make([]store.SavedName, 0, len(names))
+		for _, n := range names {
+			items = append(items, store.SavedName{
+				TaskID:   t.ID,
+				NormName: normalizeName(n, t.IgnoreExtension),
+				FileName: n,
+			})
+		}
+		if err := s.st.AddSavedNames(ctx, t.ID, items); err != nil {
+			s.log.Warn("记录转存历史失败", "task", t.ID, "err", err)
+		}
+	}
+	return tree, names, nil
+}
+
+// ---------- 任务 CRUD ----------
+
+// ListTasks 返回全部任务。
+func (s *Service) ListTasks(ctx context.Context) ([]*domain.DramaTask, error) {
+	return s.st.ListTasks(ctx)
+}
+
+// GetTask 取单个任务。
+func (s *Service) GetTask(ctx context.Context, id int64) (*domain.DramaTask, error) {
+	return s.st.GetTask(ctx, id)
+}
+
+// SaveTask 新建或更新任务（id>0 为更新）。
+func (s *Service) SaveTask(ctx context.Context, t *domain.DramaTask) (int64, error) {
+	if strings.TrimSpace(t.TaskName) == "" {
+		return 0, domain.Errorf(domain.CodeValidation, "任务名称不能为空")
+	}
+	if t.AccountID == 0 {
+		return 0, domain.Errorf(domain.CodeValidation, "请选择网盘账号")
+	}
+	if len(LinksOf(t)) == 0 {
+		return 0, domain.Errorf(domain.CodeValidation, "至少填写一条分享链接")
+	}
+	if strings.TrimSpace(t.SavePath) == "" {
+		return 0, domain.Errorf(domain.CodeValidation, "请填写保存路径")
+	}
+	if t.SkipHistory != "on" && t.SkipHistory != "off" {
+		t.SkipHistory = "global"
+	}
+	switch t.RunMode {
+	case "global", "custom", "manual":
+	default:
+		t.RunMode = "" // 兼容空值，读取时按旧规则推断
+	}
+	if t.RunMode == "custom" && t.RunTime != "" {
+		if _, err := time.Parse("15:04", t.RunTime); err != nil {
+			return 0, domain.Errorf(domain.CodeValidation, "运行时间格式应为 HH:MM")
+		}
+	}
+	// 归一化链接存储
+	SetLinks(t, LinksOf(t))
+	if t.ID > 0 {
+		if _, err := s.st.GetTask(ctx, t.ID); err != nil {
+			return 0, err
+		}
+		if err := s.st.UpdateTask(ctx, t); err != nil {
+			return 0, err
+		}
+		return t.ID, nil
+	}
+	id, err := s.st.CreateTask(ctx, t)
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// DeleteTask 删除任务。
+func (s *Service) DeleteTask(ctx context.Context, id int64) error {
+	return s.st.DeleteTask(ctx, id)
+}
+
+// SetTaskStatus 暂停/恢复任务。
+func (s *Service) SetTaskStatus(ctx context.Context, id int64, status string) error {
+	if status != "running" && status != "paused" {
+		return domain.Errorf(domain.CodeValidation, "非法的任务状态")
+	}
+	return s.st.SetTaskStatus(ctx, id, status)
+}
+
+// ListRuns 返回任务运行历史。
+func (s *Service) ListRuns(ctx context.Context, taskID int64, limit int) ([]*store.TaskRun, error) {
+	return s.st.ListRuns(ctx, taskID, limit)
+}
+
+// ListSavedNames 返回任务转存历史。
+func (s *Service) ListSavedNames(ctx context.Context, taskID int64, limit int) ([]*store.SavedName, error) {
+	return s.st.ListSavedNames(ctx, taskID, limit)
+}
+
+// ---------- 预览（preview.go 提供 PreviewShare 主体） ----------

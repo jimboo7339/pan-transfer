@@ -1,0 +1,12 @@
+# 构建上下文里排除无关文件（前端依赖与产物在容器内自建）
+web/node_modules/
+web/dist/
+data/
+data-demo/
+data-test/
+*.exe
+*.log
+.git/
+.github/
+README.md
+docker-compose*.yml
