@@ -31,6 +31,7 @@ const form = reactive({
   end_date: '',
   update_subdir: '',
   start_fid: '',
+  share_fid: '',
   sort_index: 1,
   skip_history: 'global',
   run_mode: 'manual',
@@ -111,6 +112,7 @@ async function open(task) {
       end_date: task.end_date,
       update_subdir: task.update_subdir,
       start_fid: task.start_fid,
+      share_fid: task.share_fid || '',
       sort_index: task.sort_index || 1,
       skip_history: task.skip_history || 'global',
       run_mode: task.run_mode || 'manual',
@@ -127,7 +129,7 @@ async function open(task) {
       id: 0, task_name: '', account_id: accounts.value[0]?.id || 0,
       links: [''], save_path: '', pattern: '', replace: '',
       ignore_extension: true, run_week: '', run_time: '', run_cron: '', end_date: '',
-      update_subdir: '', start_fid: '', sort_index: 1, skip_history: 'global',
+      update_subdir: '', start_fid: '', share_fid: '', sort_index: 1, skip_history: 'global',
       run_mode: 'manual', status: 'running',
     })
     scheduleMode.value = 'manual'
@@ -171,12 +173,18 @@ function openPreview(i = 0) {
     ignore_extension: form.ignore_extension,
     update_subdir: form.update_subdir,
     start_fid: form.start_fid,
+    pdir_fid: form.share_fid, // 记忆：从上次选中的文件夹直接定位
   })
 }
 
 function onUseFolder({ pdir_fid }) {
-  form.start_fid = pdir_fid
-  toast('已设置起始目录（增量转存起点）', 'success')
+  form.share_fid = pdir_fid
+  if (pdir_fid) {
+    toast('已锁定转存文件夹：只转存该文件夹下的文件', 'success')
+  } else {
+    form.share_fid = ''
+    toast('已改为转存链接根目录', 'success')
+  }
 }
 
 function onPickPath({ path }) {
@@ -312,8 +320,12 @@ async function save() {
                 <input class="input mono" v-model="form.update_subdir" placeholder="如 Season \d+，命中目录递归同步" />
               </div>
               <div class="field" style="margin-bottom: 0">
-                <div class="field-label">起始 fid（增量，可选）</div>
-                <input class="input mono" v-model="form.start_fid" placeholder="预览中「使用当前文件夹」自动填入" />
+                <div class="field-label">锁定转存文件夹</div>
+                <div class="flex" style="gap: 6px">
+                  <input class="input mono" readonly :value="form.share_fid ? form.share_fid : '链接根目录'" style="flex: 1; background: var(--surface-2)" />
+                  <button v-if="form.share_fid" class="btn btn-sm" @click="form.share_fid = ''">清除</button>
+                </div>
+                <div class="field-hint" style="margin-top: 4px">在分享预览里点「📌 只转存当前文件夹」锁定；留空则转存链接根目录。文件在子文件夹时必须锁定对应文件夹。</div>
               </div>
             </div>
           </div>

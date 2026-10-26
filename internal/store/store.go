@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 	update_subdir           TEXT NOT NULL DEFAULT '',
 	update_subdir_resave_mode TEXT NOT NULL DEFAULT '',
 	start_fid               TEXT NOT NULL DEFAULT '',
+	share_fid               TEXT NOT NULL DEFAULT '',
 	sort_index              INTEGER NOT NULL DEFAULT 1,
 	skip_history            TEXT NOT NULL DEFAULT 'global',
 	status                  TEXT NOT NULL DEFAULT 'running',
@@ -123,6 +124,11 @@ CREATE TABLE IF NOT EXISTS settings (
 	}
 	// 旧库迁移：v0.1 任务无 run_cron 列
 	if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN run_cron TEXT NOT NULL DEFAULT ''`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+	// 旧库迁移：任务无 share_fid 列（要转存的分享文件夹）
+	if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN share_fid TEXT NOT NULL DEFAULT ''`); err != nil &&
 		!strings.Contains(err.Error(), "duplicate column") {
 		return err
 	}
@@ -228,7 +234,7 @@ func ParseAccountConfig(raw string) AccountConfig {
 
 const taskCols = `id, task_name, account_id, share_url, share_links, save_path, pattern, replace,
 	ignore_extension, run_week, run_time, end_date, update_subdir, update_subdir_resave_mode,
-	start_fid, sort_index, skip_history, status, last_run_at, last_run_status, last_run_message,
+	start_fid, share_fid, sort_index, skip_history, status, last_run_at, last_run_status, last_run_message,
 	last_tree_summary, created_at, updated_at, run_mode, run_cron`
 
 func scanTask(row interface{ Scan(...any) error }) (*domain.DramaTask, error) {
@@ -237,7 +243,7 @@ func scanTask(row interface{ Scan(...any) error }) (*domain.DramaTask, error) {
 	var created, updated string
 	err := row.Scan(&t.ID, &t.TaskName, &t.AccountID, &t.ShareURL, &t.ShareLinks, &t.SavePath,
 		&t.Pattern, &t.Replace, &ignoreExt, &t.RunWeek, &t.RunTime, &t.EndDate,
-		&t.UpdateSubdir, &t.UpdateSubdirResaveMode, &t.StartFID, &t.SortIndex, &t.SkipHistory,
+		&t.UpdateSubdir, &t.UpdateSubdirResaveMode, &t.StartFID, &t.ShareFID, &t.SortIndex, &t.SkipHistory,
 		&status, &t.LastRunAt, &t.LastRunStatus, &t.LastRunMessage, &t.LastTreeSummary,
 		&created, &updated, &t.RunMode, &t.RunCron)
 	if err != nil {
@@ -259,10 +265,10 @@ func (s *Store) CreateTask(ctx context.Context, t *domain.DramaTask) (int64, err
 	now := nowStr()
 	res, err := s.db.ExecContext(ctx, `INSERT INTO tasks (
 		task_name, account_id, share_url, share_links, save_path, pattern, replace, ignore_extension,
-		run_week, run_time, end_date, update_subdir, update_subdir_resave_mode, start_fid, sort_index,
-		skip_history, status, run_mode, run_cron, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		run_week, run_time, end_date, update_subdir, update_subdir_resave_mode, start_fid, share_fid, sort_index,
+		skip_history, status, run_mode, run_cron, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.TaskName, t.AccountID, t.ShareURL, t.ShareLinks, t.SavePath, t.Pattern, t.Replace, boolInt(t.IgnoreExtension),
-		t.RunWeek, t.RunTime, t.EndDate, t.UpdateSubdir, t.UpdateSubdirResaveMode, t.StartFID, t.SortIndex,
+		t.RunWeek, t.RunTime, t.EndDate, t.UpdateSubdir, t.UpdateSubdirResaveMode, t.StartFID, t.ShareFID, t.SortIndex,
 		t.SkipHistory, boolInt(t.Status != "paused"), t.RunMode, t.RunCron, now, now)
 	if err != nil {
 		return 0, err
@@ -275,10 +281,10 @@ func (s *Store) UpdateTask(ctx context.Context, t *domain.DramaTask) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET
 		task_name=?, account_id=?, share_url=?, share_links=?, save_path=?, pattern=?, replace=?,
 		ignore_extension=?, run_week=?, run_time=?, end_date=?, update_subdir=?, update_subdir_resave_mode=?,
-		start_fid=?, sort_index=?, skip_history=?, status=?, run_mode=?, run_cron=?, updated_at=? WHERE id=?`,
+		start_fid=?, share_fid=?, sort_index=?, skip_history=?, status=?, run_mode=?, run_cron=?, updated_at=? WHERE id=?`,
 		t.TaskName, t.AccountID, t.ShareURL, t.ShareLinks, t.SavePath, t.Pattern, t.Replace,
 		boolInt(t.IgnoreExtension), t.RunWeek, t.RunTime, t.EndDate, t.UpdateSubdir, t.UpdateSubdirResaveMode,
-		t.StartFID, t.SortIndex, t.SkipHistory, boolInt(t.Status != "paused"), t.RunMode, t.RunCron, nowStr(), t.ID)
+		t.StartFID, t.ShareFID, t.SortIndex, t.SkipHistory, boolInt(t.Status != "paused"), t.RunMode, t.RunCron, nowStr(), t.ID)
 	return err
 }
 

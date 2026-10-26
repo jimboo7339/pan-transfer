@@ -23,9 +23,18 @@ const emit = defineEmits(['use-folder'])
 
 function open(p) {
   params = p
-  trail.value = []
   visible.value = true
-  load('')
+  const startFID = p.pdir_fid || ''
+  if (startFID) {
+    // 记忆定位：直接打开上次选中的文件夹，不回到根目录
+    trail.value = []
+    curDirName.value = '指定文件夹'
+    load(startFID)
+  } else {
+    trail.value = []
+    curDirName.value = '根目录'
+    load('')
+  }
 }
 defineExpose({ open })
 
@@ -94,7 +103,7 @@ function useCurrentFolder() {
               <span class="muted">/</span>
               <span class="cur">{{ curDirName }}</span>
             </div>
-            <button class="btn btn-primary btn-sm" @click="useCurrentFolder" v-if="trail.length">使用当前文件夹</button>
+            <button class="btn btn-primary btn-sm" @click="useCurrentFolder">📌 只转存当前文件夹</button>
           </div>
 
           <div v-if="loading" class="loading-block"><span class="spinner"></span> 加载中…</div>

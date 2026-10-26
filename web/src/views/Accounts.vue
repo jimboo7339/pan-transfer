@@ -15,6 +15,7 @@ const showEdit = ref(false)
 const isEdit = ref(false)
 const saving = ref(false)
 const probing = ref('')
+const probeState = ref({}) // { [id]: { status: 'ok'|'fail', message, at } } 持久显示探测结果
 const form = reactive({ id: 0, name: '', driver_type: '', config: '{}' })
 const fieldValues = ref({}) // 动态表单值
 
@@ -100,20 +101,28 @@ async function save() {
 
 async function probe(acc) {
   probing.value = acc.id
+  probeState.value[acc.id] = { status: 'loading', message: '正在连接…', at: '' }
   try {
     await accountApi.probe(acc.id)
+    probeState.value[acc.id] = { status: 'ok', message: '连接正常', at: timeNow() }
     toast(`「${acc.name}」连接正常`, 'success')
   } catch (e) {
+    probeState.value[acc.id] = { status: 'fail', message: e.message || '连接失败', at: timeNow() }
     toast(`「${acc.name}」${e.message}`, 'error')
   } finally {
     probing.value = ''
   }
 }
 
+function timeNow() {
+  return new Date().toLocaleTimeString('zh-CN', { hour12: false })
+}
+
 async function removeAcc(acc) {
   if (!confirm(`确定删除账号「${acc.name}」？`)) return
   try {
     await accountApi.remove(acc.id)
+    delete probeState.value[acc.id]
     toast('账号已删除', 'success')
     reload()
   } catch (e) {
@@ -155,6 +164,11 @@ async function removeAcc(acc) {
             </div>
           </div>
           <span class="badge" :class="a.is_active ? 'badge-success' : 'badge-gray'"><span class="dot"></span>{{ a.is_active ? '启用' : '停用' }}</span>
+        </div>
+        <div v-if="probeState[a.id]" class="probe-status" :class="probeState[a.id].status">
+          <template v-if="probeState[a.id].status === 'ok'"><span class="dot dot-ok"></span>{{ probeState[a.id].message }}<span class="probe-time">· {{ probeState[a.id].at }}</span></template>
+          <template v-else-if="probeState[a.id].status === 'fail'"><span class="dot dot-fail"></span>{{ probeState[a.id].message }}<span class="probe-time">· {{ probeState[a.id].at }}</span></template>
+          <template v-else><span class="spinner spinner-sm"></span> 正在连接…</template>
         </div>
         <div class="task-foot">
           <button class="btn btn-sm" :disabled="probing === a.id" @click="probe(a)">

@@ -125,8 +125,16 @@ func (e *DramaExecutor) Execute(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// 指定转存文件夹（"使用当前文件夹"回填的 ShareFID）优先于链接自带的根目录
+	if f := strings.TrimSpace(e.task.ShareFID); f != "" {
+		pdirFID = f
+	}
 	e.line("pwd_id: " + pwdID)
-	e.line("pdir_fid: " + pdirFID)
+	if strings.TrimSpace(e.task.ShareFID) != "" {
+		e.line("pdir_fid: " + pdirFID + "（指定文件夹）")
+	} else {
+		e.line("pdir_fid: " + pdirFID)
+	}
 
 	// 2. 获取分享 token（来自Trae）
 	e.section("获取分享 token")

@@ -153,6 +153,19 @@ code, pre { font-family: var(--mono); }
 .task-foot { display: flex; align-items: center; gap: 8px; margin-top: 2px; flex-wrap: wrap; }
 .task-foot .spacer { flex: 1; }
 
+/* ---------- 账号探测状态行 ---------- */
+.probe-status {
+  display: flex; align-items: center; gap: 6px; margin-top: 10px; padding: 7px 10px;
+  border-radius: 8px; font-size: 12.5px; line-height: 1.4; overflow-wrap: anywhere;
+}
+.probe-status.ok { background: var(--success-soft); color: var(--success); }
+.probe-status.fail { background: var(--danger-soft); color: var(--danger); }
+.probe-status.loading { background: var(--surface-2); color: var(--text-2); }
+.probe-status .dot { flex-shrink: 0; }
+.probe-status .dot-ok { background: var(--success); }
+.probe-status .dot-fail { background: var(--danger); }
+.probe-time { color: var(--text-3); font-size: 11.5px; flex-shrink: 0; }
+
 /* ---------- 徽标与标签 ---------- */
 .badge {
   display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px;
@@ -244,6 +257,7 @@ code, pre { font-family: var(--mono); }
   border-top-color: var(--primary); animation: spin 0.7s linear infinite; display: inline-block;
 }
 .spinner-lg { width: 28px; height: 28px; border-width: 3px; }
+.spinner-sm { width: 12px; height: 12px; border-width: 2px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .loading-block { display: flex; align-items: center; justify-content: center; padding: 40px; gap: 10px; color: var(--text-3); }
 
