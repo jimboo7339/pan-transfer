@@ -6,5 +6,10 @@ data-test/
 *.log
 capture.txt
 
+# 构建临时/备份文件（Windows 上 Go 覆盖正在运行的 exe 会留下 xxx.exe~）
+*~
+*.tmp
+*.bak
+
 # 前端
 web/node_modules/
