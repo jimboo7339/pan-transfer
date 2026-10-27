@@ -55,10 +55,10 @@ type Notifier interface {
 
 // Options 服务构造参数。
 type Options struct {
-	Exec     Executor
-	Store    *store.Store
-	Log      *slog.Logger
-	Notify   Notifier
+	Exec   Executor
+	Store  *store.Store
+	Log    *slog.Logger
+	Notify Notifier
 }
 
 // Service 追剧转存服务。
@@ -437,29 +437,40 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger string) (*R
 	res.TreeSummary = strings.Join(trees, "\n")
 	_ = s.st.UpdateTaskRunState(ctx, taskID, nowStr, res.Status, res.Message, res.TreeSummary)
 
-	// 通知
+	// 通知：仅在本次有新转存文件、或整次运行失败时推送；
+	// 0 文件（无新剧集 / 全部已转存）静默，避免定时任务空跑刷屏。
 	if s.notif != nil {
-		title := fmt.Sprintf("✅ 转存完成：%s", t.TaskName)
-		if res.Status == "failed" {
-			title = fmt.Sprintf("❌ 转存失败：%s", t.TaskName)
-		} else if res.Status == "partial" {
-			title = fmt.Sprintf("⚠️ 转存部分成功：%s", t.TaskName)
-		}
-		var b strings.Builder
-		b.WriteString(res.Message)
-		if len(allNames) > 0 {
-			b.WriteString("\n本次新转存：")
-			for i, n := range allNames {
-				if i >= 10 {
-					b.WriteString(fmt.Sprintf("\n…等共 %d 个文件", len(allNames)))
-					break
-				}
-				b.WriteString("\n· " + n)
+		if !shouldNotify(res.Status, res.TransferCount) {
+			s.log.Info("跳过通知：本次未转存新文件", "task", t.TaskName, "status", res.Status)
+		} else {
+			title := fmt.Sprintf("✅ 转存完成：%s", t.TaskName)
+			if res.Status == "failed" {
+				title = fmt.Sprintf("❌ 转存失败：%s", t.TaskName)
+			} else if res.Status == "partial" {
+				title = fmt.Sprintf("⚠️ 转存部分成功：%s", t.TaskName)
 			}
+			var b strings.Builder
+			b.WriteString(res.Message)
+			if len(allNames) > 0 {
+				b.WriteString("\n本次新转存：")
+				for i, n := range allNames {
+					if i >= 10 {
+						b.WriteString(fmt.Sprintf("\n…等共 %d 个文件", len(allNames)))
+						break
+					}
+					b.WriteString("\n· " + n)
+				}
+			}
+			go s.notif.Send(context.Background(), title, b.String())
 		}
-		go s.notif.Send(context.Background(), title, b.String())
 	}
 	return res, nil
+}
+
+// shouldNotify 判断一次运行是否需要推送通知：有新转存文件，或整次运行失败时推送；
+// 0 文件的成功/部分成功静默（定时任务空跑不刷屏）。
+func shouldNotify(status string, transferred int) bool {
+	return transferred > 0 || status == "failed"
 }
 
 // runOneLink 对单条分享链接执行一次转存。prevNames 是本运行中前面链接已转存的

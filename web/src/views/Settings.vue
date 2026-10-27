@@ -189,7 +189,7 @@ async function clearPassword() {
         <div class="flex mb-16">
           <div>
             <div class="card-title" style="margin-bottom: 2px">通知推送</div>
-            <div class="page-desc">转存成功 / 失败时推送到以下渠道。</div>
+            <div class="page-desc">有新文件转存或整次运行失败时推送；本次 0 个新文件（无更新 / 全部已转存）时静默，不推送空跑结果。</div>
           </div>
           <span class="flex-1"></span>
           <button class="btn btn-primary" @click="openAddChannel">＋ 添加渠道</button>
