@@ -313,6 +313,16 @@ code, pre { font-family: var(--mono); }
 .preview-filename svg { flex-shrink: 0; opacity: 0.7; }
 .preview-filename .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .saved-note { color: var(--warn); font-size: 12px; display: block; margin-top: 2px; }
+.saved-note.sn-saved { color: var(--success); }
+.saved-note.sn-conflict { color: var(--warn); }
+.saved-note.sn-skip { color: var(--text-3); }
+
+/* 预览行状态着色：已转存淡绿 / 冲突淡黄 / 起始前淡灰 */
+.table tbody tr.row-saved { background: var(--success-soft); }
+.table tbody tr.row-conflict { background: var(--warn-soft); }
+.table tbody tr.row-skip { background: var(--surface-2); }
+.table tbody tr.row-saved .nm,
+.table tbody tr.row-conflict .nm { color: var(--text-2); }
 .dir-crumb { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; font-size: 13px; }
 .dir-crumb a { cursor: pointer; color: var(--text-2); padding: 3px 6px; border-radius: 6px; }
 .dir-crumb a:hover { background: var(--surface-2); color: var(--primary); }
