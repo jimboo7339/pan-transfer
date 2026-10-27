@@ -87,6 +87,8 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/tasks/{id}/run", s.wrap(s.handleTaskRun))
 	m.HandleFunc("GET /api/tasks/{id}/runs", s.wrap(s.handleTaskRuns))
 	m.HandleFunc("GET /api/tasks/{id}/saved-names", s.wrap(s.handleTaskSavedNames))
+	m.HandleFunc("GET /api/tasks/{id}/saved-names/count", s.wrap(s.handleTaskSavedCount))
+	m.HandleFunc("DELETE /api/tasks/{id}/saved-names", s.wrap(s.handleTaskSavedClear))
 
 	// 命名正则规则
 	m.HandleFunc("GET /api/rules", s.wrap(s.handleRuleList))
@@ -156,8 +158,8 @@ func (s *Server) wrap(fn func(w http.ResponseWriter, r *http.Request) error) htt
 }
 
 type stdBody struct {
-	Ok   bool   `json:"ok"`
-	Data any    `json:"data,omitempty"`
+	Ok   bool `json:"ok"`
+	Data any  `json:"data,omitempty"`
 }
 
 func respond(w http.ResponseWriter, data any) {
@@ -709,7 +711,9 @@ func (s *Server) handleTaskRun(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	res, err := s.deps.Transfer.RunTaskNow(r.Context(), id)
+	// 脱离请求上下文：客户端刷新/断开/反代超时不应中断正在进行的转存
+	ctx := context.WithoutCancel(r.Context())
+	res, err := s.deps.Transfer.RunTaskNow(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -742,6 +746,34 @@ func (s *Server) handleTaskSavedNames(w http.ResponseWriter, r *http.Request) er
 		return err
 	}
 	respond(w, names)
+	return nil
+}
+
+// handleTaskSavedCount 转存历史条数。
+func (s *Server) handleTaskSavedCount(w http.ResponseWriter, r *http.Request) error {
+	id, err := pathID(r)
+	if err != nil {
+		return err
+	}
+	n, err := s.deps.Store.CountSavedNames(r.Context(), id)
+	if err != nil {
+		return err
+	}
+	respond(w, map[string]int{"count": n})
+	return nil
+}
+
+// handleTaskSavedClear 清空任务转存历史（之后按目标目录现状重新判定，可能重复转存）。
+func (s *Server) handleTaskSavedClear(w http.ResponseWriter, r *http.Request) error {
+	id, err := pathID(r)
+	if err != nil {
+		return err
+	}
+	n, err := s.deps.Store.ClearSavedNames(r.Context(), id)
+	if err != nil {
+		return err
+	}
+	respond(w, map[string]int64{"cleared": n})
 	return nil
 }
 
@@ -855,11 +887,11 @@ func (s *Server) handleRuleTest(w http.ResponseWriter, r *http.Request) error {
 	}
 	matched, result, actualPattern, actualReplace := transfer.TestRename(in.Name, in.Pattern, in.Replace)
 	respond(w, map[string]any{
-		"name":              in.Name,
-		"matched":           matched,
-		"result":            result,
-		"resolved_pattern":  actualPattern,
-		"resolved_replace":  actualReplace,
+		"name":             in.Name,
+		"matched":          matched,
+		"result":           result,
+		"resolved_pattern": actualPattern,
+		"resolved_replace": actualReplace,
 	})
 	return nil
 }
@@ -902,6 +934,10 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) error
 	schedWeek, _ := s.deps.Store.GetSetting(ctx, "schedule_week")
 	schedCron, _ := s.deps.Store.GetSetting(ctx, "schedule_cron")
 	pwd, _ := s.deps.Store.GetSetting(ctx, "auth_password")
+	retention, _ := s.deps.Store.GetSetting(ctx, "run_retention_days")
+	if retention == "" {
+		retention = "90"
+	}
 	respond(w, map[string]any{
 		"notify_channels":     channels,
 		"skip_history_global": skip,
@@ -909,6 +945,7 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) error
 		"schedule_time":       schedTime,
 		"schedule_week":       schedWeek,
 		"schedule_cron":       schedCron,
+		"run_retention_days":  retention,
 		"auth_enabled":        strings.TrimSpace(pwd) != "",
 	})
 	return nil
@@ -922,6 +959,7 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) error
 		ScheduleTime      *string           `json:"schedule_time"`
 		ScheduleWeek      *string           `json:"schedule_week"`
 		ScheduleCron      *string           `json:"schedule_cron"`
+		RunRetentionDays  *string           `json:"run_retention_days"`
 		Password          *string           `json:"password"`
 	}
 	if err := decode(r, &in); err != nil {
@@ -984,6 +1022,15 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) error
 			}
 		}
 		if err := s.deps.Store.SetSetting(ctx, "schedule_cron", v); err != nil {
+			return err
+		}
+	}
+	if in.RunRetentionDays != nil {
+		v, err := strconv.Atoi(strings.TrimSpace(*in.RunRetentionDays))
+		if err != nil || v < 0 {
+			return domain.Errorf(domain.CodeValidation, "运行记录保留天数应为非负整数（0 = 永久）")
+		}
+		if err := s.deps.Store.SetSetting(ctx, "run_retention_days", strconv.Itoa(v)); err != nil {
 			return err
 		}
 	}

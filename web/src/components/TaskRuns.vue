@@ -12,6 +12,8 @@ const loading = ref(false)
 const task = ref(null)
 const runs = ref([])
 const saved = ref([])
+const savedTotal = ref(0)
+const clearing = ref(false)
 
 function open(t) {
   task.value = t
@@ -26,11 +28,34 @@ async function reload() {
   loading.value = true
   try {
     if (tab.value === 'runs') runs.value = (await taskApi.runs(task.value.id)) || []
-    else saved.value = (await taskApi.savedNames(task.value.id)) || []
+    else {
+      saved.value = (await taskApi.savedNames(task.value.id)) || []
+      savedTotal.value = (await taskApi.savedCount(task.value.id))?.count ?? saved.value.length
+    }
   } catch (e) {
     toast(e.message, 'error')
   } finally {
     loading.value = false
+  }
+}
+
+function toggleLog(id) {
+  const s = new Set(expandedLog.value)
+  s.has(id) ? s.delete(id) : s.add(id)
+  expandedLog.value = s
+}
+
+async function clearSaved() {
+  if (!confirm(`确定清空「${task.value?.task_name}」的转存历史（共 ${savedTotal.value} 条）？\n清空后按目标目录现状重新判定，已有文件可能被重复转存。`)) return
+  clearing.value = true
+  try {
+    const r = await taskApi.clearSavedNames(task.value.id)
+    toast(`已清空 ${r?.cleared ?? 0} 条转存历史`, 'success')
+    reload()
+  } catch (e) {
+    toast(e.message, 'error')
+  } finally {
+    clearing.value = false
   }
 }
 
@@ -78,11 +103,19 @@ function switchTab(t) {
                 </div>
                 <div v-if="r.message" class="mt-8" style="font-size: 12.5px; color: var(--text-2)">{{ r.message }}</div>
                 <pre v-if="r.tree_summary" class="log-tree mt-8" style="max-height: 200px">{{ r.tree_summary }}</pre>
+                <details v-if="r.log" class="run-log-details mt-8">
+                  <summary>📄 详细执行日志</summary>
+                  <pre class="log-tree" style="max-height: 320px">{{ r.log }}</pre>
+                </details>
               </div>
             </div>
           </template>
 
           <template v-else>
+            <div class="flex mb-8" style="justify-content: space-between">
+              <span class="muted" style="font-size: 12.5px">共 {{ savedTotal }} 条记录（列表最多显示 {{ saved.length }} 条）</span>
+              <button v-if="savedTotal" class="btn btn-sm btn-danger btn-ghost" :disabled="clearing" @click="clearSaved">🗑 清空转存历史</button>
+            </div>
             <div v-if="!saved.length" class="empty">
               <div class="empty-title">暂无转存记录</div>
               <div class="empty-hint">成功转存的文件会记录在此，用于按名跳过重复转存</div>

@@ -19,6 +19,7 @@ const settings = reactive({
   schedule_time: '',
   schedule_week: '',
   schedule_cron: '',
+  run_retention_days: '90',
   auth_enabled: false,
 })
 
@@ -270,6 +271,12 @@ async function clearPassword() {
             <option value="off">关闭：仅按目标目录现有文件去重</option>
           </select>
           <div class="field-hint">任务里选择「跟随全局」时使用此处取值。</div>
+        </div>
+        <div class="field" style="max-width: 420px; margin-bottom: 0">
+          <div class="field-label">运行记录保留天数</div>
+          <input class="input" type="number" min="0" v-model="settings.run_retention_days"
+            @change="persist({ run_retention_days: String(parseInt(settings.run_retention_days, 10) || 0) })" />
+          <div class="field-hint">超期的运行记录每天自动清理（每个任务至少保留最近 50 条）；填 0 = 永久保留。转存历史（去重依据）不受影响。</div>
         </div>
       </div>
 

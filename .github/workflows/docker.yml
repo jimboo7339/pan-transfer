@@ -17,7 +17,37 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # 测试先行：后端 vet + 全量单测 + 前端构建，不过不发布镜像
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -count=1 ./...
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: frontend build
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
   build-push:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read

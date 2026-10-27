@@ -67,6 +67,8 @@ export const taskApi = {
   run: (id) => api.post(`/api/tasks/${id}/run`),
   runs: (id, limit = 10) => api.get(`/api/tasks/${id}/runs?limit=${limit}`),
   savedNames: (id, limit = 300) => api.get(`/api/tasks/${id}/saved-names?limit=${limit}`),
+  savedCount: (id) => api.get(`/api/tasks/${id}/saved-names/count`),
+  clearSavedNames: (id) => api.del(`/api/tasks/${id}/saved-names`),
 }
 
 export const shareApi = {

@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS task_runs (
 	status        TEXT NOT NULL,
 	message       TEXT NOT NULL DEFAULT '',
 	tree_summary  TEXT NOT NULL DEFAULT '',
+	log           TEXT NOT NULL DEFAULT '',
 	transfer_count INTEGER NOT NULL DEFAULT 0,
 	link          TEXT NOT NULL DEFAULT '',
 	started_at    TEXT NOT NULL,
@@ -135,6 +136,11 @@ CREATE TABLE IF NOT EXISTS settings (
 	// 旧数据迁移：task 级 share_fid 已废弃，改为写入对应链接 URL（#/list/share/<fid>）。
 	// 仅单链接任务能确定归属；多链接无法判断，直接清空避免套用到错误链接。
 	if err := s.migrateLegacyShareFID(); err != nil {
+		return err
+	}
+	// 旧库迁移：运行记录无 log 列（详细执行日志）
+	if _, err := s.db.Exec(`ALTER TABLE task_runs ADD COLUMN log TEXT NOT NULL DEFAULT ''`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
 		return err
 	}
 	return nil
@@ -460,6 +466,7 @@ type TaskRun struct {
 	Status        string    `json:"status"`
 	Message       string    `json:"message"`
 	TreeSummary   string    `json:"tree_summary"`
+	Log           string    `json:"log"`
 	TransferCount int       `json:"transfer_count"`
 	Link          string    `json:"link"`
 	StartedAt     time.Time `json:"started_at"`
@@ -477,11 +484,11 @@ func (s *Store) CreateRun(ctx context.Context, taskID int64, link string) (int64
 	return res.LastInsertId()
 }
 
-// FinishRun 回写运行结果。
-func (s *Store) FinishRun(ctx context.Context, runID int64, status, message, tree string, count int) error {
+// FinishRun 回写运行结果（log 为执行器详细日志，可为空）。
+func (s *Store) FinishRun(ctx context.Context, runID int64, status, message, tree, log string, count int) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE task_runs SET status=?, message=?, tree_summary=?, transfer_count=?, finished_at=? WHERE id=?`,
-		status, message, tree, count, nowStr(), runID)
+		`UPDATE task_runs SET status=?, message=?, tree_summary=?, log=?, transfer_count=?, finished_at=? WHERE id=?`,
+		status, message, tree, log, count, nowStr(), runID)
 	return err
 }
 
@@ -490,7 +497,7 @@ func (s *Store) ListRuns(ctx context.Context, taskID int64, limit int) ([]*TaskR
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, status, message, tree_summary, transfer_count, link, started_at, finished_at
+	rows, err := s.db.QueryContext(ctx, `SELECT id, task_id, status, message, tree_summary, log, transfer_count, link, started_at, finished_at
 		FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT ?`, taskID, limit)
 	if err != nil {
 		return nil, err
@@ -500,7 +507,7 @@ func (s *Store) ListRuns(ctx context.Context, taskID int64, limit int) ([]*TaskR
 	for rows.Next() {
 		var r TaskRun
 		var started, finished string
-		if err := rows.Scan(&r.ID, &r.TaskID, &r.Status, &r.Message, &r.TreeSummary, &r.TransferCount, &r.Link, &started, &finished); err != nil {
+		if err := rows.Scan(&r.ID, &r.TaskID, &r.Status, &r.Message, &r.TreeSummary, &r.Log, &r.TransferCount, &r.Link, &started, &finished); err != nil {
 			return nil, err
 		}
 		r.StartedAt, _ = time.Parse(time.RFC3339, started)
@@ -624,6 +631,42 @@ func (s *Store) ListSavedNames(ctx context.Context, taskID int64, limit int) ([]
 		out = append(out, &n)
 	}
 	return out, rows.Err()
+}
+
+// CountSavedNames 返回任务的转存历史条数。
+func (s *Store) CountSavedNames(ctx context.Context, taskID int64) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM saved_names WHERE task_id=?`, taskID).Scan(&n)
+	return n, err
+}
+
+// ClearSavedNames 清空任务的转存历史（之后运行会按目标目录现状重新判定，可能重复转存）。
+func (s *Store) ClearSavedNames(ctx context.Context, taskID int64) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM saved_names WHERE task_id=?`, taskID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// PruneRuns 清理旧的运行记录：删除 started_at 早于 keepDays 天前、且不在每个任务
+// 最近 keepPerTask 条之内的记录；返回删除条数。历史是排障依据，少量保底防误删。
+func (s *Store) PruneRuns(ctx context.Context, keepDays, keepPerTask int) (int64, error) {
+	if keepDays <= 0 {
+		return 0, nil
+	}
+	cutoff := time.Now().AddDate(0, 0, -keepDays).Format(time.RFC3339)
+	if keepPerTask <= 0 {
+		keepPerTask = 50
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM task_runs WHERE started_at < ? AND id NOT IN (
+		SELECT id FROM (
+			SELECT id, ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY started_at DESC, id DESC) AS rn FROM task_runs
+		) WHERE rn <= ?)`, cutoff, keepPerTask)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // SavedNormNames 返回任务全部已保存的规范化文件名（去重跳过用）。

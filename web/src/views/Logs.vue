@@ -95,8 +95,12 @@ const taskName = (id) => tasks.value.find(t => t.id === id)?.task_name || `任�
             <span class="muted" style="font-size: 12px">{{ expanded.has(r.id) ? '▾' : '▸' }}</span>
           </div>
           <div v-if="r.message" style="padding: 0 16px 10px; font-size: 12.5px; color: var(--text-2)">{{ r.message }}</div>
-          <div v-if="expanded.has(r.id) && r.tree_summary" style="padding: 0 16px 14px">
-            <pre class="log-tree">{{ r.tree_summary }}</pre>
+          <div v-if="expanded.has(r.id) && (r.tree_summary || r.log)" style="padding: 0 16px 14px">
+            <pre v-if="r.tree_summary" class="log-tree">{{ r.tree_summary }}</pre>
+            <details v-if="r.log" class="run-log-details" style="margin-top: 8px">
+              <summary>📄 详细执行日志</summary>
+              <pre class="log-tree" style="max-height: 360px">{{ r.log }}</pre>
+            </details>
           </div>
         </div>
       </div>

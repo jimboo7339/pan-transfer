@@ -5,6 +5,7 @@ package transfer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -62,6 +63,10 @@ type Options struct {
 }
 
 // Service 追剧转存服务。
+// runTimeout 单次任务运行的总超时：每个网盘请求自身有 30s 超时，但多链接、
+// 多文件、轮询累加起来仍可能长时间挂起，这里给整体兜底。
+var runTimeout = 30 * time.Minute
+
 type Service struct {
 	exec  Executor
 	st    *store.Store
@@ -73,6 +78,8 @@ type Service struct {
 
 	schedMu     sync.Mutex
 	lastTrigger map[int64]string // 任务 ID -> 上次触发的分钟窗口（防同分钟重复触发）
+	schedSem    chan struct{}    // 定时运行全局并发上限，避免同时到点的任务瞬间打出大量网盘请求
+	lastPrune   string           // 上次清理运行记录的日期（YYYY-MM-DD），每天最多清一次
 	appCtx      context.Context
 	cancel      context.CancelFunc
 }
@@ -91,6 +98,7 @@ func New(opts Options) *Service {
 		notif:       opts.Notify,
 		running:     map[int64]struct{}{},
 		lastTrigger: map[int64]string{},
+		schedSem:    make(chan struct{}, 2),
 		appCtx:      ctx,
 		cancel:      cancel,
 	}
@@ -176,6 +184,8 @@ func (s *Service) enabledRegexOverrides(ctx context.Context) (map[string]MagicRe
 
 // Start 启动定时调度循环（30s 粒度；命中任务 RunTime 时刻触发）。
 func (s *Service) Start() {
+	// 启动时先清一次过期运行记录，之后每天一次
+	go s.pruneRunsDaily()
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -185,9 +195,35 @@ func (s *Service) Start() {
 				return
 			case <-ticker.C:
 				s.sweep()
+				s.pruneRunsDaily()
 			}
 		}
 	}()
+}
+
+// pruneRunsDaily 按设置 run_retention_days（0 = 永久保留）清理旧的运行记录，
+// 每天最多执行一次；每个任务至少保留最近 50 条作为排障依据。
+func (s *Service) pruneRunsDaily() {
+	today := time.Now().Format("2006-01-02")
+	if s.lastPrune == today {
+		return
+	}
+	s.lastPrune = today
+	days := 90
+	if v, err := s.st.GetSetting(s.appCtx, "run_retention_days"); err == nil {
+		if n, e := strconv.Atoi(strings.TrimSpace(v)); e == nil && n >= 0 {
+			days = n
+		}
+	}
+	if days == 0 {
+		return
+	}
+	n, err := s.st.PruneRuns(s.appCtx, days, 50)
+	if err != nil {
+		s.log.Warn("清理运行记录失败", "err", err)
+	} else if n > 0 {
+		s.log.Info("已清理过期运行记录", "count", n, "keep_days", days)
+	}
 }
 
 // sweep 扫描到期任务并触发（cron 匹配，支持 */N 步长、周几组合等标准 5 字段表达式）。
@@ -234,6 +270,13 @@ func (s *Service) sweep() {
 				return
 			case <-time.After(time.Duration(1+now.UnixNano()%180) * time.Second):
 			}
+			// 全局并发上限：避免同时到点的任务瞬间打出大量网盘请求触发风控
+			select {
+			case <-ctx.Done():
+				return
+			case s.schedSem <- struct{}{}:
+			}
+			defer func() { <-s.schedSem }()
 			if _, err := s.RunTask(ctx, taskID, "schedule"); err != nil {
 				s.log.Warn("定时任务执行失败", "task", taskID, "err", err)
 			}
@@ -361,6 +404,10 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger string) (*R
 		s.mu.Unlock()
 	}()
 
+	// 单次运行总超时：整体兜底，防止网络/上游异常导致运行长时间挂起
+	ctx, cancel := context.WithTimeout(ctx, runTimeout)
+	defer cancel()
+
 	links := LinksOf(t)
 	if len(links) == 0 {
 		return nil, domain.Errorf(domain.CodeValidation, "任务没有配置分享链接")
@@ -392,19 +439,19 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger string) (*R
 	for _, link := range links {
 		select {
 		case <-ctx.Done():
-			return res, ctx.Err()
+			return res, domain.Errorf(domain.CodeInternal, "运行中止：%v", friendlyRunErr(ctx.Err()))
 		default:
 		}
 		runID, err := s.st.CreateRun(ctx, taskID, link)
 		if err != nil {
 			return nil, err
 		}
-		tree, names, rerr := s.runOneLink(ctx, t, link, overrides, useHistory, allNames)
+		tree, names, runLog, rerr := s.runOneLink(ctx, t, link, overrides, useHistory, allNames)
 		status := "success"
 		msg := ""
 		if rerr != nil {
 			status = "failed"
-			msg = rerr.Error()
+			msg = friendlyRunErr(rerr)
 			lastErr = rerr
 			res.LinksFailed++
 		} else {
@@ -415,7 +462,7 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger string) (*R
 		if tree != "" {
 			trees = append(trees, tree)
 		}
-		_ = s.st.FinishRun(ctx, runID, status, msg, tree, len(names))
+		_ = s.st.FinishRun(ctx, runID, status, msg, tree, runLog, len(names))
 	}
 
 	// 汇总任务状态
@@ -429,7 +476,7 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger string) (*R
 	} else {
 		res.Status = "failed"
 		if lastErr != nil {
-			res.Message = "全部链接失败：" + lastErr.Error()
+			res.Message = "全部链接失败：" + friendlyRunErr(lastErr)
 		} else {
 			res.Message = "全部链接失败"
 		}
@@ -473,15 +520,27 @@ func shouldNotify(status string, transferred int) bool {
 	return transferred > 0 || status == "failed"
 }
 
+// friendlyRunErr 把超时/中止类错误转成可读文案，其余原样返回。
+func friendlyRunErr(err error) string {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Sprintf("运行超时（单次上限 %s），已中止", runTimeout)
+	case errors.Is(err, context.Canceled):
+		return "运行已中止（服务停止或请求取消）"
+	default:
+		return err.Error()
+	}
+}
+
 // runOneLink 对单条分享链接执行一次转存。prevNames 是本运行中前面链接已转存的
-// 文件名，用于跨链接去重。
-func (s *Service) runOneLink(ctx context.Context, t *domain.DramaTask, link string, overrides map[string]MagicRegexEntry, useHistory bool, prevNames []string) (string, []string, error) {
+// 文件名，用于跨链接去重。返回值：树状摘要、新转存文件名、执行器详细日志、错误。
+func (s *Service) runOneLink(ctx context.Context, t *domain.DramaTask, link string, overrides map[string]MagicRegexEntry, useHistory bool, prevNames []string) (string, []string, string, error) {
 	// 转存历史（按名去重）
 	var skip []string
 	if useHistory {
 		names, err := s.st.SavedNormNames(ctx, t.ID)
 		if err != nil {
-			return "", nil, err
+			return "", nil, "", err
 		}
 		skip = append(skip, names...)
 	}
@@ -489,6 +548,7 @@ func (s *Service) runOneLink(ctx context.Context, t *domain.DramaTask, link stri
 
 	var tree string
 	var names []string
+	var runLog string
 	err := s.exec.Run(ctx, t.AccountID, func(drv driver.Driver) error {
 		taskCopy := *t
 		taskCopy.ShareURL = link
@@ -498,11 +558,13 @@ func (s *Service) runOneLink(ctx context.Context, t *domain.DramaTask, link stri
 		}
 		ex.ExtraSkipNames = skip
 		tree, err = ex.Execute(ctx)
+		// 无论成败都取日志，排障时能看到卡在哪一步
+		runLog = truncateRunLog(ex.Log())
 		names = ex.TransferredNames()
 		return err
 	})
 	if err != nil {
-		return tree, nil, err
+		return tree, nil, runLog, err
 	}
 	// 记录转存历史
 	if len(names) > 0 {
@@ -518,7 +580,16 @@ func (s *Service) runOneLink(ctx context.Context, t *domain.DramaTask, link stri
 			s.log.Warn("记录转存历史失败", "task", t.ID, "err", err)
 		}
 	}
-	return tree, names, nil
+	return tree, names, runLog, nil
+}
+
+// truncateRunLog 限制落库的运行日志大小，防止异常情况下撑爆数据库。
+func truncateRunLog(log string) string {
+	const max = 256 * 1024
+	if len(log) <= max {
+		return log
+	}
+	return log[:max] + "\n…（日志过长已截断）"
 }
 
 // ---------- 任务 CRUD ----------
