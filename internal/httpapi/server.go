@@ -571,7 +571,6 @@ type taskIn struct {
 	EndDate         string   `json:"end_date"`
 	UpdateSubdir    string   `json:"update_subdir"`
 	StartFID        string   `json:"start_fid"`
-	ShareFID        string   `json:"share_fid"` // 要转存的分享文件夹（"使用当前文件夹"回填）
 	SortIndex       int      `json:"sort_index"`
 	SkipHistory     string   `json:"skip_history"`
 	RunMode         string   `json:"run_mode"` // manual/global/custom
@@ -593,7 +592,6 @@ func (in *taskIn) toTask() *domain.DramaTask {
 		EndDate:         in.EndDate,
 		UpdateSubdir:    in.UpdateSubdir,
 		StartFID:        in.StartFID,
-		ShareFID:        in.ShareFID,
 		SortIndex:       in.SortIndex,
 		SkipHistory:     in.SkipHistory,
 		RunMode:         in.RunMode,
@@ -619,7 +617,6 @@ func taskOut(t *domain.DramaTask) map[string]any {
 		"end_date":         t.EndDate,
 		"update_subdir":    t.UpdateSubdir,
 		"start_fid":        t.StartFID,
-		"share_fid":        t.ShareFID,
 		"sort_index":       t.SortIndex,
 		"skip_history":     t.SkipHistory,
 		"run_mode":         transfer.EffectiveRunMode(t),

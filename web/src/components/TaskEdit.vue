@@ -7,6 +7,7 @@ import FileBrowser from './FileBrowser.vue'
 import { accountApi, taskApi, ruleApi, settingsApi, cronApi } from '../api'
 import { CRON_PRESETS, cronToText } from '../cron'
 import WeekPicker from './WeekPicker.vue'
+import { extractShareFid, withShareFid, stripShareFid } from '../shareurl'
 
 const toast = inject('toast')
 
@@ -31,7 +32,6 @@ const form = reactive({
   end_date: '',
   update_subdir: '',
   start_fid: '',
-  share_fid: '',
   sort_index: 1,
   skip_history: 'global',
   run_mode: 'manual',
@@ -112,7 +112,6 @@ async function open(task) {
       end_date: task.end_date,
       update_subdir: task.update_subdir,
       start_fid: task.start_fid,
-      share_fid: task.share_fid || '',
       sort_index: task.sort_index || 1,
       skip_history: task.skip_history || 'global',
       run_mode: task.run_mode || 'manual',
@@ -129,7 +128,7 @@ async function open(task) {
       id: 0, task_name: '', account_id: accounts.value[0]?.id || 0,
       links: [''], save_path: '', pattern: '', replace: '',
       ignore_extension: true, run_week: '', run_time: '', run_cron: '', end_date: '',
-      update_subdir: '', start_fid: '', share_fid: '', sort_index: 1, skip_history: 'global',
+      update_subdir: '', start_fid: '', sort_index: 1, skip_history: 'global',
       run_mode: 'manual', status: 'running',
     })
     scheduleMode.value = 'manual'
@@ -165,6 +164,7 @@ function openPreview(i = 0) {
   previewRef.value.open({
     account_id: form.account_id,
     share_url: link,
+    link_index: i, // 「只转存当前文件夹」只写回这条链接
     task_name: form.task_name,
     pattern: form.pattern,
     replace: form.replace,
@@ -173,17 +173,19 @@ function openPreview(i = 0) {
     ignore_extension: form.ignore_extension,
     update_subdir: form.update_subdir,
     start_fid: form.start_fid,
-    pdir_fid: form.share_fid, // 记忆：从上次选中的文件夹直接定位
   })
 }
 
-function onUseFolder({ pdir_fid }) {
-  form.share_fid = pdir_fid
-  if (pdir_fid) {
-    toast('已锁定转存文件夹：只转存该文件夹下的文件', 'success')
+// 把选中的文件夹写入对应链接（CASX 约定：#/list/share/<fid>），每条链接各自记忆。
+function onUseFolder({ pdir_fid, link_index = 0 }) {
+  const idx = link_index >= 0 && link_index < form.links.length ? link_index : 0
+  const fid = String(pdir_fid || '').trim()
+  if (fid) {
+    form.links[idx] = withShareFid(form.links[idx], fid)
+    toast(`已锁定第 ${idx + 1} 条链接的转存文件夹`, 'success')
   } else {
-    form.share_fid = ''
-    toast('已改为转存链接根目录', 'success')
+    form.links[idx] = stripShareFid(form.links[idx])
+    toast(`第 ${idx + 1} 条链接已改为转存根目录`, 'success')
   }
 }
 
@@ -250,15 +252,23 @@ async function save() {
               <div style="font-size: 12px; color: var(--text-3); margin-bottom: 8px">
                 多源链接按从上到下顺序逐条转存（去重互斥），失效自动跳过。可把画质更好的链接放前面。每条链接可单独预览。
               </div>
-              <div v-for="(link, i) in form.links" :key="i" class="link-item">
-                <span class="link-idx">{{ i + 1 }}</span>
-                <input class="input" v-model="form.links[i]" placeholder="https://pan.quark.cn/s/… 或 https://www.guangyapan.com/s/…（可带提取码）" />
-                <button class="btn btn-icon" title="预览此链接" :disabled="!form.account_id || !link.trim()" @click="openPreview(i)">🔍</button>
-                <button class="btn btn-icon" title="上移" :disabled="i === 0" @click="moveLink(i, -1)">↑</button>
-                <button class="btn btn-icon" title="下移" :disabled="i === form.links.length - 1" @click="moveLink(i, 1)">↓</button>
-                <button class="btn btn-icon btn-danger" title="删除" @click="removeLink(i)">✕</button>
+              <div v-for="(link, i) in form.links" :key="i" style="margin-bottom: 8px">
+                <div class="link-item" style="margin-bottom: 0">
+                  <span class="link-idx">{{ i + 1 }}</span>
+                  <input class="input" v-model="form.links[i]" placeholder="https://pan.quark.cn/s/… 或 https://www.guangyapan.com/s/…（可带提取码）" />
+                  <button class="btn btn-icon" title="预览此链接" :disabled="!form.account_id || !link.trim()" @click="openPreview(i)">🔍</button>
+                  <button class="btn btn-icon" title="上移" :disabled="i === 0" @click="moveLink(i, -1)">↑</button>
+                  <button class="btn btn-icon" title="下移" :disabled="i === form.links.length - 1" @click="moveLink(i, 1)">↓</button>
+                  <button class="btn btn-icon btn-danger" title="删除" @click="removeLink(i)">✕</button>
+                </div>
+                <div v-if="extractShareFid(link)" class="link-fid-line">
+                  <span>📌 已锁定文件夹</span>
+                  <code class="mono">{{ extractShareFid(link) }}</code>
+                  <a @click="form.links[i] = stripShareFid(form.links[i])">改为转存根目录</a>
+                </div>
               </div>
               <button class="btn btn-sm" @click="addLink">＋ 添加链接</button>
+              <div class="field-hint" style="margin-top: 8px">在预览里点「📌 只转存当前文件夹」只会锁定该条链接的文件夹，每条链接独立记忆。</div>
             </div>
 
             <div class="form-row">
@@ -320,12 +330,8 @@ async function save() {
                 <input class="input mono" v-model="form.update_subdir" placeholder="如 Season \d+，命中目录递归同步" />
               </div>
               <div class="field" style="margin-bottom: 0">
-                <div class="field-label">锁定转存文件夹</div>
-                <div class="flex" style="gap: 6px">
-                  <input class="input mono" readonly :value="form.share_fid ? form.share_fid : '链接根目录'" style="flex: 1; background: var(--surface-2)" />
-                  <button v-if="form.share_fid" class="btn btn-sm" @click="form.share_fid = ''">清除</button>
-                </div>
-                <div class="field-hint" style="margin-top: 4px">在分享预览里点「📌 只转存当前文件夹」锁定；留空则转存链接根目录。文件在子文件夹时必须锁定对应文件夹。</div>
+                <div class="field-label">起始 fid（增量，可选）</div>
+                <input class="input mono" v-model="form.start_fid" placeholder="只转存该文件之后的更新（手工填 fid）" />
               </div>
             </div>
           </div>

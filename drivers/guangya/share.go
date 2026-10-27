@@ -53,7 +53,7 @@ type shareFileEntry struct {
 	ParentID string `json:"parentId"`
 	FileName string `json:"fileName"`
 	FileSize int64  `json:"fileSize"`
-	ResType  int    `json:"resType"`  // 2=文件夹
+	ResType  int    `json:"resType"` // 2=文件夹
 	UTime    int64  `json:"utime"`
 	DirType  int    `json:"dirType"`  // 保留解析但不用于判目录（语义存疑，CASX 也不用）
 	FileType *int   `json:"fileType"` // 用 *int 区分「字段缺失(nil)」和「值为 0」，避免默认值误伤（来自Trae）
@@ -75,10 +75,11 @@ func (e shareFileEntry) toShareItem() driver.ShareEntry {
 }
 
 // pickIsDir 对齐 CASX guangya_adapter.py _pick_is_dir 的三级判断（来自Trae）：
-// 1. 先查 API 直接返回的布尔字段 folder / isDir（最可靠）
-// 2. 再查 fileType 是否存在且值为 0（CASX 约定 fileType=0 表示目录；
-//    必须先判 nil 避免 JSON 字段缺失时 int 默认 0 把所有条目判成目录）
-// 3. 最后查 resType == 2
+//  1. 先查 API 直接返回的布尔字段 folder / isDir（最可靠）
+//  2. 再查 fileType 是否存在且值为 0（CASX 约定 fileType=0 表示目录；
+//     必须先判 nil 避免 JSON 字段缺失时 int 默认 0 把所有条目判成目录）
+//  3. 最后查 resType == 2
+//
 // 注意：不使用 DirType，因为 CASX 也不用它，且实测 dirType=1 会把文件误判成目录。
 func (e shareFileEntry) pickIsDir() bool {
 	// 第 1 级：布尔字段直接命中
@@ -123,6 +124,8 @@ var (
 	guangyaSharePath2  = regexp.MustCompile(`(?i)/s/([A-Za-z0-9_-]+)`)
 	guangyaShareLink   = regexp.MustCompile(`(?i)/link/([A-Za-z0-9_-]+)`)
 	guangyaShareDL     = regexp.MustCompile(`(?i)/download/([A-Za-z0-9_-]+)`)
+	// CASX getShareurl 约定：选中文件夹写入 #/list/share/<fid>
+	guangyaListShareFidRe = regexp.MustCompile(`(?:^|/)list/share/([A-Za-z0-9_-]+)`)
 )
 
 // publicPostShare 是光鸭分享接口的匿名访问通道（来自Trae）。
@@ -262,6 +265,23 @@ func (d *Driver) ExtractShareURL(shareURL string) (string, string, string, error
 		if v, ok := parsed[key]; ok && v != "" {
 			pdirFID = normalizeGuangyaOutputFID(v)
 			break
+		}
+	}
+	// fragment 优先：CASX getShareurl 把选中文件夹写入 #/list/share/<fid>（可带 ?parentId=）
+	if pdirFID == "0" {
+		if frag := parseURLFragment(extractedURL); frag != "" {
+			fragQuery := parseURLQuery("#" + frag)
+			for _, key := range []string{"parentId", "parent_id", "pdir_fid", "fid", "fileId"} {
+				if v, ok := fragQuery[key]; ok && v != "" {
+					pdirFID = normalizeGuangyaOutputFID(v)
+					break
+				}
+			}
+			if pdirFID == "0" {
+				if m := guangyaListShareFidRe.FindStringSubmatch(frag); len(m) > 1 {
+					pdirFID = normalizeGuangyaOutputFID(m[1])
+				}
+			}
 		}
 	}
 
@@ -648,6 +668,15 @@ func parseURLQuery(rawURL string) map[string]string {
 		}
 	}
 	return out
+}
+
+// parseURLFragment 返回 URL 的 # 之后部分（不含 #），无 fragment 返回空串。
+func parseURLFragment(rawURL string) string {
+	idx := strings.Index(rawURL, "#")
+	if idx < 0 {
+		return ""
+	}
+	return rawURL[idx+1:]
 }
 
 // parseURLPath 返回 URL 的 path 部分（来自Trae）

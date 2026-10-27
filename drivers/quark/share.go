@@ -104,6 +104,9 @@ var (
 	quarkShareIDRe   = regexp.MustCompile(`/s/(\w+)`)
 	quarkPasscodeRe  = regexp.MustCompile(`pwd=(\w+)`)
 	quarkSharePathRe = regexp.MustCompile(`/(\w{32})-?([^/]+)?`)
+	// CASX getShareurl 约定：选中文件夹写入 ?fid=<fid> 或 #/list/share/<fid>
+	quarkURLFidRe  = regexp.MustCompile(`(?:\?|&)(?:fid|fileId)=([^&#]+)`)
+	quarkListFidRe = regexp.MustCompile(`#/list/share/([A-Za-z0-9]{6,64})`)
 )
 
 // ExtractShareURL 解析夸克分享链接（来自Trae）
@@ -121,9 +124,22 @@ func (d *Driver) ExtractShareURL(shareURL string) (string, string, string, error
 		passcode = m[1]
 	}
 	pdirFID := "0"
-	matches := quarkSharePathRe.FindAllStringSubmatch(raw, -1)
-	if len(matches) > 0 {
-		pdirFID = matches[len(matches)-1][1]
+	// 优先采用链接内嵌的文件夹（预览里「只转存当前文件夹」写入）：?fid= 或 #/list/share/<fid>
+	if m := quarkURLFidRe.FindStringSubmatch(raw); len(m) > 1 {
+		if v := strings.TrimSpace(m[1]); v != "" && v != "0" && v != "root" {
+			pdirFID = v
+		}
+	}
+	if pdirFID == "0" {
+		if m := quarkListFidRe.FindStringSubmatch(raw); len(m) > 1 {
+			pdirFID = m[1]
+		}
+	}
+	if pdirFID == "0" {
+		matches := quarkSharePathRe.FindAllStringSubmatch(raw, -1)
+		if len(matches) > 0 {
+			pdirFID = matches[len(matches)-1][1]
+		}
 	}
 	if pwdID == "" {
 		return "", "", "0", domain.Errorf(domain.CodeValidation, "无法解析分享链接：缺少 /s/{id}")
@@ -273,8 +289,8 @@ func (d *Driver) SaveShareFiles(ctx context.Context, req driver.SaveShareReq) (s
 // shareTaskData 是 /task 的 data 字段（来自Trae）
 // 与 CASX _extract_saved_fids 对齐：save_as_top_fids 嵌套在 save_as 对象内
 type shareTaskData struct {
-	Status  int `json:"status"`
-	SaveAs  *struct {
+	Status int `json:"status"`
+	SaveAs *struct {
 		SaveAsTopFIDs []string `json:"save_as_top_fids"`
 	} `json:"save_as"`
 	// 兜底：部分接口版本直接放在 data 层，来自Trae

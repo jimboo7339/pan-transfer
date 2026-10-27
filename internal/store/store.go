@@ -127,12 +127,105 @@ CREATE TABLE IF NOT EXISTS settings (
 		!strings.Contains(err.Error(), "duplicate column") {
 		return err
 	}
-	// 旧库迁移：任务无 share_fid 列（要转存的分享文件夹）
+	// 旧库迁移：任务无 share_fid 列（早期版本的 task 级“锁定文件夹”）
 	if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN share_fid TEXT NOT NULL DEFAULT ''`); err != nil &&
 		!strings.Contains(err.Error(), "duplicate column") {
 		return err
 	}
+	// 旧数据迁移：task 级 share_fid 已废弃，改为写入对应链接 URL（#/list/share/<fid>）。
+	// 仅单链接任务能确定归属；多链接无法判断，直接清空避免套用到错误链接。
+	if err := s.migrateLegacyShareFID(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// migrateLegacyShareFID 把旧的 task 级 share_fid 并入链接后清空；可重复执行。
+func (s *Store) migrateLegacyShareFID() error {
+	rows, err := s.db.Query(`SELECT id, share_links, share_url, share_fid FROM tasks WHERE share_fid != ''`)
+	if err != nil {
+		// 列不存在（全新库且未执行 ALTER）时忽略
+		if strings.Contains(err.Error(), "no such column") {
+			return nil
+		}
+		return err
+	}
+	type legacy struct {
+		id    int64
+		links string
+		url   string
+		fid   string
+	}
+	var list []legacy
+	for rows.Next() {
+		var l legacy
+		if err := rows.Scan(&l.id, &l.links, &l.url, &l.fid); err != nil {
+			rows.Close()
+			return err
+		}
+		list = append(list, l)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, l := range list {
+		var links []string
+		if strings.TrimSpace(l.links) != "" {
+			_ = json.Unmarshal([]byte(l.links), &links)
+		}
+		if len(links) == 0 && strings.TrimSpace(l.url) != "" {
+			links = []string{strings.TrimSpace(l.url)}
+		}
+		if len(links) == 1 {
+			link := withShareFIDInURL(links[0], l.fid)
+			b, _ := json.Marshal([]string{link})
+			if _, err := s.db.Exec(`UPDATE tasks SET share_links=?, share_url=?, share_fid='' WHERE id=?`, string(b), link, l.id); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := s.db.Exec(`UPDATE tasks SET share_fid='' WHERE id=?`, l.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// withShareFIDInURL 把文件夹 fid 写入分享链接（CASX 约定：#/list/share/<fid>），
+// 同时去掉已有 fid/fileId 参数与旧 fragment，避免重复或冲突。
+func withShareFIDInURL(link, fid string) string {
+	base := strings.TrimSpace(link)
+	if i := strings.Index(base, "#"); i >= 0 {
+		base = base[:i]
+	}
+	if i := strings.Index(base, "?"); i >= 0 {
+		head, query := base[:i], base[i+1:]
+		kept := make([]string, 0, 4)
+		for _, kv := range strings.Split(query, "&") {
+			if kv == "" {
+				continue
+			}
+			k := kv
+			if eq := strings.Index(kv, "="); eq >= 0 {
+				k = kv[:eq]
+			}
+			if k == "fid" || k == "fileId" {
+				continue
+			}
+			kept = append(kept, kv)
+		}
+		if len(kept) == 0 {
+			base = head
+		} else {
+			base = head + "?" + strings.Join(kept, "&")
+		}
+	}
+	f := strings.TrimSpace(fid)
+	if f == "" || f == "0" || f == "root" {
+		return base
+	}
+	return base + "#/list/share/" + f
 }
 
 func nowStr() string { return time.Now().Format(time.RFC3339) }
@@ -234,7 +327,7 @@ func ParseAccountConfig(raw string) AccountConfig {
 
 const taskCols = `id, task_name, account_id, share_url, share_links, save_path, pattern, replace,
 	ignore_extension, run_week, run_time, end_date, update_subdir, update_subdir_resave_mode,
-	start_fid, share_fid, sort_index, skip_history, status, last_run_at, last_run_status, last_run_message,
+	start_fid, sort_index, skip_history, status, last_run_at, last_run_status, last_run_message,
 	last_tree_summary, created_at, updated_at, run_mode, run_cron`
 
 func scanTask(row interface{ Scan(...any) error }) (*domain.DramaTask, error) {
@@ -243,7 +336,7 @@ func scanTask(row interface{ Scan(...any) error }) (*domain.DramaTask, error) {
 	var created, updated string
 	err := row.Scan(&t.ID, &t.TaskName, &t.AccountID, &t.ShareURL, &t.ShareLinks, &t.SavePath,
 		&t.Pattern, &t.Replace, &ignoreExt, &t.RunWeek, &t.RunTime, &t.EndDate,
-		&t.UpdateSubdir, &t.UpdateSubdirResaveMode, &t.StartFID, &t.ShareFID, &t.SortIndex, &t.SkipHistory,
+		&t.UpdateSubdir, &t.UpdateSubdirResaveMode, &t.StartFID, &t.SortIndex, &t.SkipHistory,
 		&status, &t.LastRunAt, &t.LastRunStatus, &t.LastRunMessage, &t.LastTreeSummary,
 		&created, &updated, &t.RunMode, &t.RunCron)
 	if err != nil {
@@ -265,10 +358,10 @@ func (s *Store) CreateTask(ctx context.Context, t *domain.DramaTask) (int64, err
 	now := nowStr()
 	res, err := s.db.ExecContext(ctx, `INSERT INTO tasks (
 		task_name, account_id, share_url, share_links, save_path, pattern, replace, ignore_extension,
-		run_week, run_time, end_date, update_subdir, update_subdir_resave_mode, start_fid, share_fid, sort_index,
-		skip_history, status, run_mode, run_cron, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		run_week, run_time, end_date, update_subdir, update_subdir_resave_mode, start_fid, sort_index,
+		skip_history, status, run_mode, run_cron, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.TaskName, t.AccountID, t.ShareURL, t.ShareLinks, t.SavePath, t.Pattern, t.Replace, boolInt(t.IgnoreExtension),
-		t.RunWeek, t.RunTime, t.EndDate, t.UpdateSubdir, t.UpdateSubdirResaveMode, t.StartFID, t.ShareFID, t.SortIndex,
+		t.RunWeek, t.RunTime, t.EndDate, t.UpdateSubdir, t.UpdateSubdirResaveMode, t.StartFID, t.SortIndex,
 		t.SkipHistory, boolInt(t.Status != "paused"), t.RunMode, t.RunCron, now, now)
 	if err != nil {
 		return 0, err
@@ -281,10 +374,10 @@ func (s *Store) UpdateTask(ctx context.Context, t *domain.DramaTask) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET
 		task_name=?, account_id=?, share_url=?, share_links=?, save_path=?, pattern=?, replace=?,
 		ignore_extension=?, run_week=?, run_time=?, end_date=?, update_subdir=?, update_subdir_resave_mode=?,
-		start_fid=?, share_fid=?, sort_index=?, skip_history=?, status=?, run_mode=?, run_cron=?, updated_at=? WHERE id=?`,
+		start_fid=?, sort_index=?, skip_history=?, status=?, run_mode=?, run_cron=?, updated_at=? WHERE id=?`,
 		t.TaskName, t.AccountID, t.ShareURL, t.ShareLinks, t.SavePath, t.Pattern, t.Replace,
 		boolInt(t.IgnoreExtension), t.RunWeek, t.RunTime, t.EndDate, t.UpdateSubdir, t.UpdateSubdirResaveMode,
-		t.StartFID, t.ShareFID, t.SortIndex, t.SkipHistory, boolInt(t.Status != "paused"), t.RunMode, t.RunCron, nowStr(), t.ID)
+		t.StartFID, t.SortIndex, t.SkipHistory, boolInt(t.Status != "paused"), t.RunMode, t.RunCron, nowStr(), t.ID)
 	return err
 }
 

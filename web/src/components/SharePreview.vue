@@ -3,6 +3,7 @@
 import { ref, inject } from 'vue'
 import Modal from './Modal.vue'
 import { shareApi, fmtSize, fmtTime } from '../api'
+import { extractShareFid, stripShareFid } from '../shareurl'
 
 const toast = inject('toast')
 
@@ -22,19 +23,14 @@ let params = null
 const emit = defineEmits(['use-folder'])
 
 function open(p) {
-  params = p
   visible.value = true
-  const startFID = p.pdir_fid || ''
-  if (startFID) {
-    // 记忆定位：直接打开上次选中的文件夹，不回到根目录
-    trail.value = []
-    curDirName.value = '指定文件夹'
-    load(startFID)
-  } else {
-    trail.value = []
-    curDirName.value = '根目录'
-    load('')
-  }
+  // 每条链接各自携带文件夹：#/list/share/<fid> 由链接自己解析，互不影响。
+  const startFID = extractShareFid(p.share_url)
+  // 浏览用链接去掉 fid，保证「🏠 根目录」能真正回到分享根目录。
+  params = { ...p, share_url: stripShareFid(p.share_url) }
+  trail.value = []
+  curDirName.value = startFID ? '指定文件夹' : '根目录'
+  load(startFID)
 }
 defineExpose({ open })
 
@@ -79,7 +75,13 @@ function jumpTo(idx) {
 }
 
 function useCurrentFolder() {
-  emit('use-folder', { pdir_fid: pdirFID.value, name: curDirName.value })
+  const fid = String(pdirFID.value || '').trim()
+  const normalized = ['', '0', 'root'].includes(fid.toLowerCase()) ? '' : fid
+  emit('use-folder', {
+    pdir_fid: normalized,
+    name: curDirName.value,
+    link_index: params?.link_index ?? 0,
+  })
   visible.value = false
 }
 </script>
@@ -103,7 +105,10 @@ function useCurrentFolder() {
               <span class="muted">/</span>
               <span class="cur">{{ curDirName }}</span>
             </div>
-            <button class="btn btn-primary btn-sm" @click="useCurrentFolder">📌 只转存当前文件夹</button>
+            <div class="flex" style="gap: 8px; align-items: center">
+              <span class="field-hint" style="margin-top: 0">仅影响当前这条链接</span>
+              <button class="btn btn-primary btn-sm" @click="useCurrentFolder">📌 只转存当前文件夹</button>
+            </div>
           </div>
 
           <div v-if="loading" class="loading-block"><span class="spinner"></span> 加载中…</div>
