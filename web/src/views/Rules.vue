@@ -112,43 +112,76 @@ async function runTest() {
     </div>
 
     <div v-if="loading" class="loading-block"><span class="spinner"></span> 加载中…</div>
-    <div v-else class="card" style="overflow: hidden">
-      <table class="table">
-        <thead>
-          <tr>
-            <th style="width: 150px">规则</th>
-            <th>匹配正则（pattern）</th>
-            <th>替换模板（replace）</th>
-            <th style="width: 90px">状态</th>
-            <th style="width: 170px">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="r in rules" :key="r.key">
-            <td>
-              <div class="mono" style="font-weight: 600">{{ r.key }}</div>
+    <template v-else>
+      <!-- 桌面端：表格 -->
+      <div class="card rules-table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th style="width: 150px">规则</th>
+              <th>匹配正则（pattern）</th>
+              <th>替换模板（replace）</th>
+              <th style="width: 90px">状态</th>
+              <th style="width: 170px">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="r in rules" :key="r.key">
+              <td>
+                <div class="mono" style="font-weight: 600">{{ r.key }}</div>
+                <div class="muted" style="font-size: 12px">{{ r.label || '自定义规则' }}</div>
+              </td>
+              <td class="mono ellipsis" style="max-width: 280px" :title="r.pattern">{{ r.pattern || '(空 = 全部)' }}</td>
+              <td class="mono ellipsis" style="max-width: 220px" :title="r.replace">{{ r.replace || '—' }}</td>
+              <td>
+                <label class="switch" @click.prevent="toggleEnabled(r)">
+                  <input type="checkbox" :checked="r.enabled" />
+                  <span class="track"></span>
+                </label>
+              </td>
+              <td>
+                <div class="flex">
+                  <button class="btn btn-sm" @click="openEdit(r)">编辑</button>
+                  <button v-if="r.overridden" class="btn btn-sm" @click="resetRule(r)">恢复默认</button>
+                  <button v-if="r.custom" class="btn btn-sm btn-danger btn-ghost" @click="removeRule(r)">删除</button>
+                  <span v-if="r.builtin && !r.overridden" class="muted" style="font-size: 12px">内置</span>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- 移动端：卡片列表（表格在窄屏会挤压/截断，操作按钮也点不到） -->
+      <div class="rules-mobile">
+        <div v-for="r in rules" :key="r.key" class="card rules-card">
+          <div class="flex" style="justify-content: space-between; align-items: flex-start; gap: 10px">
+            <div style="min-width: 0">
+              <div class="mono" style="font-weight: 600; overflow-wrap: anywhere">{{ r.key }}</div>
               <div class="muted" style="font-size: 12px">{{ r.label || '自定义规则' }}</div>
-            </td>
-            <td class="mono ellipsis" style="max-width: 280px" :title="r.pattern">{{ r.pattern || '(空 = 全部)' }}</td>
-            <td class="mono ellipsis" style="max-width: 220px" :title="r.replace">{{ r.replace || '—' }}</td>
-            <td>
-              <label class="switch" @click.prevent="toggleEnabled(r)">
-                <input type="checkbox" :checked="r.enabled" />
-                <span class="track"></span>
-              </label>
-            </td>
-            <td>
-              <div class="flex">
-                <button class="btn btn-sm" @click="openEdit(r)">编辑</button>
-                <button v-if="r.overridden" class="btn btn-sm" @click="resetRule(r)">恢复默认</button>
-                <button v-if="r.custom" class="btn btn-sm btn-danger btn-ghost" @click="removeRule(r)">删除</button>
-                <span v-if="r.builtin && !r.overridden" class="muted" style="font-size: 12px">内置</span>
-              </div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+            </div>
+            <label class="switch" style="flex-shrink: 0" @click.prevent="toggleEnabled(r)">
+              <input type="checkbox" :checked="r.enabled" />
+              <span class="track"></span>
+            </label>
+          </div>
+          <div class="rules-field">
+            <span class="k">匹配正则</span>
+            <code class="v">{{ r.pattern || '(空 = 全部)' }}</code>
+          </div>
+          <div class="rules-field">
+            <span class="k">替换模板</span>
+            <code class="v">{{ r.replace || '—' }}</code>
+          </div>
+          <div class="flex" style="gap: 8px; flex-wrap: wrap; margin-top: 12px">
+            <button class="btn btn-sm" @click="openEdit(r)">编辑</button>
+            <button v-if="r.overridden" class="btn btn-sm" @click="resetRule(r)">恢复默认</button>
+            <button v-if="r.custom" class="btn btn-sm btn-danger btn-ghost" @click="removeRule(r)">删除</button>
+            <span v-if="r.builtin && !r.overridden" class="muted" style="font-size: 12px; align-self: center">内置规则</span>
+          </div>
+        </div>
+      </div>
+    </template>
 
     <div class="card card-pad mt-16">
       <div class="card-title">支持的魔法变量</div>

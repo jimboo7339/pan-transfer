@@ -199,6 +199,15 @@ code, pre { font-family: var(--mono); }
 .table .num { font-family: var(--mono); font-size: 12.5px; }
 .table-wrap { overflow: auto; border-radius: 10px; border: 1px solid var(--border); }
 
+/* ---------- 命名规则页：桌面表格 / 移动卡片 ---------- */
+.rules-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.rules-mobile { display: none; }
+.rules-card { padding: 14px 15px; }
+.rules-card + .rules-card { margin-top: 10px; }
+.rules-field { display: flex; flex-direction: column; gap: 2px; margin-top: 10px; }
+.rules-field .k { font-size: 11.5px; color: var(--text-3); }
+.rules-field .v { font-size: 12.5px; color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+
 /* ---------- 弹窗 ---------- */
 .modal-overlay {
   position: fixed; inset: 0; background: rgba(18, 24, 43, 0.45); backdrop-filter: blur(2px);
@@ -467,6 +476,8 @@ html.dark .toast-error { background: #7f1d1d; }
   .qr-img { width: 180px; height: 180px; }
   .table { font-size: 13px; }
   .table th, .table td { padding: 9px 10px; }
+  .rules-table-wrap { display: none; }
+  .rules-mobile { display: block; }
   .login-card { width: min(360px, calc(100vw - 32px)); padding: 28px 22px; }
 }
 
