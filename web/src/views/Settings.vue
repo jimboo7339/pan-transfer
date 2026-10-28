@@ -88,7 +88,7 @@ const logsCat = ref(null)
 const catForm = reactive({
   id: 0, name: '', callback_enabled: false, callback_mode: 'round',
   callback_method: 'POST', callback_url: '', callback_headers: '', callback_body: '',
-  callback_timeout_sec: 15, sort_order: 0,
+  callback_timeout_sec: 15, skip_zero: false, sort_order: 0,
 })
 
 async function loadCategories() {
@@ -104,7 +104,7 @@ function openCatNew() {
   Object.assign(catForm, {
     id: 0, name: '', callback_enabled: false, callback_mode: 'round',
     callback_method: 'POST', callback_url: '', callback_headers: '', callback_body: '',
-    callback_timeout_sec: 15, sort_order: categories.value.length,
+    callback_timeout_sec: 15, skip_zero: false, sort_order: categories.value.length,
   })
   catTestResult.value = null
   showCatEdit.value = true
@@ -116,7 +116,7 @@ function openCatEdit(c) {
     id: c.id, name: c.name, callback_enabled: c.callback_enabled, callback_mode: c.callback_mode,
     callback_method: c.callback_method, callback_url: c.callback_url,
     callback_headers: c.callback_headers || '', callback_body: c.callback_body || '',
-    callback_timeout_sec: c.callback_timeout_sec || 15, sort_order: c.sort_order || 0,
+    callback_timeout_sec: c.callback_timeout_sec || 15, skip_zero: !!c.skip_zero, sort_order: c.sort_order || 0,
   })
   catTestResult.value = null
   showCatEdit.value = true
@@ -527,6 +527,10 @@ async function clearPassword() {
               <input type="checkbox" v-model="catForm.callback_enabled" />
               启用回调（关闭则仅作为任务分组，不调用接口）
             </label>
+            <label class="checkbox" v-if="catForm.callback_enabled">
+              <input type="checkbox" v-model="catForm.skip_zero" />
+              0 转存不回调（本次没有任何新文件且无失败时不调用接口；有失败仍会回调）
+            </label>
             <template v-if="catForm.callback_enabled">
               <div class="form-row">
                 <div class="field">
@@ -656,7 +660,7 @@ async function clearPassword() {
 
 POST Body（默认模板，可自行修改）：
 {"event":"transfer.completed","category":"{category}","status":"{status}","count":{transfer_count},"files":{transferred_files_json},"path":"{save_path}"}</pre>
-              <p style="margin: 0"><b style="color: var(--text)">注意事项：</b>HTTP 2xx 视为成功；超时默认 15 秒（可配）；调用失败不自动重试，结果记录在「回调日志」里；请求头（可能含密钥）明文存于本地数据库；服务重启会丢失进行中的轮次；下游接口建议使用内网地址。</p>
+              <p style="margin: 0"><b style="color: var(--text)">注意事项：</b>勾选「0 转存不回调」后，本次（轮次模式按整轮汇总）没有任何新文件且无失败时不调用接口，有失败仍会回调；HTTP 2xx 视为成功；超时默认 15 秒（可配）；调用失败不自动重试，结果记录在「回调日志」里；请求头（可能含密钥）明文存于本地数据库；服务重启会丢失进行中的轮次；下游接口建议使用内网地址。</p>
             </div>
           </div>
           <div class="modal-foot">

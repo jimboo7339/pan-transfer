@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS task_categories (
 	callback_headers   TEXT NOT NULL DEFAULT '',
 	callback_body      TEXT NOT NULL DEFAULT '',
 	callback_timeout_sec INTEGER NOT NULL DEFAULT 15,
+	skip_zero          INTEGER NOT NULL DEFAULT 0,
 	sort_order         INTEGER NOT NULL DEFAULT 0,
 	created_at         TEXT NOT NULL,
 	updated_at         TEXT NOT NULL
@@ -171,6 +172,11 @@ CREATE TABLE IF NOT EXISTS settings (
 	}
 	// 旧库迁移：任务无 category_id 列（任务分类，用于分类回调）
 	if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN category_id INTEGER NOT NULL DEFAULT 0`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+	// 旧库迁移：分类无 skip_zero 列（0 转存不回调）
+	if _, err := s.db.Exec(`ALTER TABLE task_categories ADD COLUMN skip_zero INTEGER NOT NULL DEFAULT 0`); err != nil &&
 		!strings.Contains(err.Error(), "duplicate column") {
 		return err
 	}

@@ -56,6 +56,94 @@ func TestBuildVarsJSONSafety(t *testing.T) {
 	}
 }
 
+// skip_zero：0 转存不触发，失败/有新文件仍触发（per_task 与 round 两种模式）。
+func TestSkipZeroCallback(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		bodies = append(bodies, "hit")
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer ts.Close()
+
+	st, err := store.Open(t.TempDir() + "/cb3.db")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	enabled := true
+	svc := New(Options{Store: st})
+
+	mkTask := func(name string, catID int64) *domain.DramaTask {
+		id, err := st.CreateTask(ctx, &domain.DramaTask{TaskName: name, AccountID: 1, SavePath: "/tv", Status: "running", CategoryID: catID})
+		if err != nil {
+			t.Fatalf("create task: %v", err)
+		}
+		task, err := st.GetTask(ctx, id)
+		if err != nil {
+			t.Fatalf("get task: %v", err)
+		}
+		return task
+	}
+	hits := func() int { mu.Lock(); defer mu.Unlock(); return len(bodies) }
+
+	// per_task + skip_zero
+	catID, _ := st.SaveCategory(ctx, &store.TaskCategory{
+		Name: "跳零", CallbackEnabled: enabled, CallbackMode: "per_task",
+		CallbackMethod: "POST", CallbackURL: ts.URL + "/cb", SkipZero: enabled,
+	})
+	task := mkTask("跳零任务", catID)
+	svc.settleCategory(task, &RunResult{TaskID: task.ID, Status: "success", TransferCount: 0}, nil, "manual")
+	time.Sleep(150 * time.Millisecond)
+	if n := hits(); n != 0 {
+		t.Fatalf("0 转存成功触发了回调 %d 次，应为 0", n)
+	}
+	svc.settleCategory(task, &RunResult{TaskID: task.ID, Status: "failed"}, nil, "manual")
+	deadline := time.Now().Add(2 * time.Second)
+	for hits() < 1 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if hits() != 1 {
+		t.Fatalf("失败运行应触发回调，实际 %d 次", hits())
+	}
+	svc.settleCategory(task, &RunResult{TaskID: task.ID, Status: "success", TransferCount: 2}, []string{"a.mkv"}, "manual")
+	deadline = time.Now().Add(2 * time.Second)
+	for hits() < 2 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if hits() != 2 {
+		t.Fatalf("有新文件应触发回调，实际 %d 次", hits())
+	}
+
+	// round + skip_zero：整轮全 0 且无失败 → 不触发并正常关轮；随后失败轮触发
+	roundID, _ := st.SaveCategory(ctx, &store.TaskCategory{
+		Name: "跳零轮次", CallbackEnabled: enabled, CallbackMode: "round",
+		CallbackMethod: "POST", CallbackURL: ts.URL + "/cb", SkipZero: enabled,
+	})
+	t1 := mkTask("轮次1", roundID)
+	t2 := mkTask("轮次2", roundID)
+	svc.joinCategoryRound(t1)
+	svc.joinCategoryRound(t2)
+	svc.settleCategory(t1, &RunResult{TaskID: t1.ID, Status: "success", TransferCount: 0}, nil, "schedule")
+	svc.settleCategory(t2, &RunResult{TaskID: t2.ID, Status: "success", TransferCount: 0}, nil, "schedule")
+	time.Sleep(200 * time.Millisecond)
+	if n := hits(); n != 2 {
+		t.Fatalf("整轮 0 转存不应触发回调，当前 %d 次（期望仍为 2）", n)
+	}
+	// 轮次应已关闭：再来一个任务形成新轮并失败 → 触发
+	svc.settleCategory(t1, &RunResult{TaskID: t1.ID, Status: "failed"}, nil, "manual")
+	deadline = time.Now().Add(2 * time.Second)
+	for hits() < 3 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if hits() != 3 {
+		t.Fatalf("失败轮次应触发回调，实际 %d 次", hits())
+	}
+}
+
 // 轮次聚合：两个任务入轮，最后一个完成时才回调一次，payload 汇总两个任务。
 func TestRoundCallbackFlow(t *testing.T) {
 	var mu sync.Mutex

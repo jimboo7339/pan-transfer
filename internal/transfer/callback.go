@@ -346,6 +346,11 @@ func (s *Service) settleCategory(t *domain.DramaTask, res *RunResult, names []st
 		if outcome.Status == "skipped" || outcome.Status == "" {
 			return // 没有实际运行，不打扰下游
 		}
+		// 0 转存不回调：无新文件且无失败时静默（与通知门控同一口径，失败仍要上报）
+		if cat.SkipZero && outcome.Count == 0 && outcome.Status != "failed" {
+			s.log.Info("跳过分类回调：本次未转存新文件", "category", cat.Name, "task", t.TaskName)
+			return
+		}
 		s.fireCallback(cat, "task", buildTaskCallbackVars(t, cat.Name, res, names, trigger), defaultCallbackBody)
 		return
 	}
@@ -378,6 +383,22 @@ func (s *Service) settleCategory(t *domain.DramaTask, res *RunResult, names []st
 
 	if fire {
 		sort.Slice(results, func(i, j int) bool { return results[i].TaskID < results[j].TaskID })
+		// 0 转存不回调：整轮无新文件且无失败时静默（轮次照常关闭，不会卡住）
+		if cat.SkipZero {
+			total, agg := 0, "success"
+			for _, rs := range results {
+				total += rs.Count
+				if rs.Status == "failed" {
+					agg = "failed"
+				} else if rs.Status == "partial" && agg != "failed" {
+					agg = "partial"
+				}
+			}
+			if total == 0 && agg != "failed" {
+				s.log.Info("跳过分类回调：本轮未转存新文件", "category", cat.Name, "round", roundID)
+				return
+			}
+		}
 		s.fireCallback(cat, "round", buildRoundVars(cat.Name, roundID, results, trigger), defaultRoundCallbackBody)
 	}
 }

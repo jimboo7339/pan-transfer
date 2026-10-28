@@ -18,6 +18,7 @@ type TaskCategory struct {
 	CallbackHeaders    string    `json:"callback_headers"` // JSON 对象字符串
 	CallbackBody       string    `json:"callback_body"`    // Body 模板，空=用默认模板
 	CallbackTimeoutSec int       `json:"callback_timeout_sec"`
+	SkipZero           bool      `json:"skip_zero"` // 0 转存不回调：无新文件且无失败时不调用
 	SortOrder          int       `json:"sort_order"`
 	TaskCount          int       `json:"task_count"`       // 列表接口附带
 	LastCallbackAt     string    `json:"last_callback_at"` // 列表接口附带
@@ -39,18 +40,19 @@ type CallbackLog struct {
 }
 
 const categoryCols = `id, name, callback_enabled, callback_mode, callback_method, callback_url,
-	callback_headers, callback_body, callback_timeout_sec, sort_order, created_at, updated_at`
+	callback_headers, callback_body, callback_timeout_sec, skip_zero, sort_order, created_at, updated_at`
 
 func scanCategory(row interface{ Scan(...any) error }) (*TaskCategory, error) {
 	var c TaskCategory
-	var enabled int
+	var enabled, skipZero int
 	var created, updated string
 	if err := row.Scan(&c.ID, &c.Name, &enabled, &c.CallbackMode, &c.CallbackMethod,
 		&c.CallbackURL, &c.CallbackHeaders, &c.CallbackBody, &c.CallbackTimeoutSec,
-		&c.SortOrder, &created, &updated); err != nil {
+		&skipZero, &c.SortOrder, &created, &updated); err != nil {
 		return nil, err
 	}
 	c.CallbackEnabled = enabled != 0
+	c.SkipZero = skipZero != 0
 	c.CreatedAt, _ = time.Parse(time.RFC3339, created)
 	c.UpdatedAt, _ = time.Parse(time.RFC3339, updated)
 	return &c, nil
@@ -99,10 +101,10 @@ func (s *Store) SaveCategory(ctx context.Context, c *TaskCategory) (int64, error
 	if c.ID == 0 {
 		res, err := s.db.ExecContext(ctx, `INSERT INTO task_categories (
 			name, callback_enabled, callback_mode, callback_method, callback_url, callback_headers,
-			callback_body, callback_timeout_sec, sort_order, created_at, updated_at)
-			VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			callback_body, callback_timeout_sec, skip_zero, sort_order, created_at, updated_at)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
 			c.Name, boolInt(c.CallbackEnabled), c.CallbackMode, c.CallbackMethod, c.CallbackURL,
-			c.CallbackHeaders, c.CallbackBody, c.CallbackTimeoutSec, c.SortOrder, now, now)
+			c.CallbackHeaders, c.CallbackBody, c.CallbackTimeoutSec, boolInt(c.SkipZero), c.SortOrder, now, now)
 		if err != nil {
 			return 0, err
 		}
@@ -110,9 +112,9 @@ func (s *Store) SaveCategory(ctx context.Context, c *TaskCategory) (int64, error
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE task_categories SET
 		name=?, callback_enabled=?, callback_mode=?, callback_method=?, callback_url=?, callback_headers=?,
-		callback_body=?, callback_timeout_sec=?, sort_order=?, updated_at=? WHERE id=?`,
+		callback_body=?, callback_timeout_sec=?, skip_zero=?, sort_order=?, updated_at=? WHERE id=?`,
 		c.Name, boolInt(c.CallbackEnabled), c.CallbackMode, c.CallbackMethod, c.CallbackURL,
-		c.CallbackHeaders, c.CallbackBody, c.CallbackTimeoutSec, c.SortOrder, now, c.ID)
+		c.CallbackHeaders, c.CallbackBody, c.CallbackTimeoutSec, boolInt(c.SkipZero), c.SortOrder, now, c.ID)
 	return c.ID, err
 }
 

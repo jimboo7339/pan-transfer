@@ -31,6 +31,7 @@ type categoryIn struct {
 	CallbackHeaders    string `json:"callback_headers"`
 	CallbackBody       string `json:"callback_body"`
 	CallbackTimeoutSec int    `json:"callback_timeout_sec"`
+	SkipZero           *bool  `json:"skip_zero"`
 	SortOrder          int    `json:"sort_order"`
 }
 
@@ -92,6 +93,7 @@ func (s *Server) handleCategorySave(w http.ResponseWriter, r *http.Request) erro
 		CallbackHeaders:    strings.TrimSpace(in.CallbackHeaders),
 		CallbackBody:       in.CallbackBody,
 		CallbackTimeoutSec: in.CallbackTimeoutSec,
+		SkipZero:           in.SkipZero != nil && *in.SkipZero,
 		SortOrder:          in.SortOrder,
 	}
 	id, err := s.deps.Store.SaveCategory(r.Context(), cat)
