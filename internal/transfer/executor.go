@@ -150,7 +150,7 @@ func (e *DramaExecutor) Execute(ctx context.Context) (string, error) {
 	// 4. 列出目标目录已有文件（来自Trae）
 	destItems, err := e.drv.ListFiles(ctx, destFID)
 	if err != nil {
-		return "", domain.Wrap(domain.CodeDriverError, err)
+		return "", wrapDriverErr(err)
 	}
 	destFileNames := make([]string, 0, len(destItems))
 	destDirMap := make(map[string]string) // name -> fid
@@ -252,7 +252,7 @@ func (e *DramaExecutor) ensureDestDir(ctx context.Context, savePath string) (str
 		// 检查是否已存在
 		items, err := e.drv.ListFiles(ctx, parentID)
 		if err != nil {
-			return "", domain.Wrap(domain.CodeDriverError, err)
+			return "", wrapDriverErr(err)
 		}
 		found := ""
 		for _, it := range items {
@@ -809,4 +809,12 @@ func ValidateSchedule(task *domain.DramaTask, allowOnce bool, now time.Time) err
 		return ErrSkipTask
 	}
 	return nil
+}
+
+// wrapDriverErr 保留驱动已给出的错误码（如 RATE_LIMITED），避免被统一成「网盘服务异常」而丢失限流语义。
+func wrapDriverErr(err error) error {
+	if ae, ok := domain.AsAppError(err); ok {
+		return ae
+	}
+	return domain.Wrap(domain.CodeDriverError, err)
 }

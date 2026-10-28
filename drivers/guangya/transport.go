@@ -149,7 +149,15 @@ func (d *Driver) waitOperationDelay(ctx context.Context) error {
 	return driver.WaitRequestInterval(ctx, d.intervalGate, defaultOperationDelayMS)
 }
 
+// apiRequest 发起需要 Bearer 的账户接口请求；限流（127/429/354）自动指数退避重试。
 func (d *Driver) apiRequest(ctx context.Context, path string, body map[string]any, out any, allowedCodes ...int) error {
+	return driver.RetryOnRateLimit(ctx, "guangya api "+path, func() error {
+		return d.apiRequestOnce(ctx, path, body, out, allowedCodes...)
+	})
+}
+
+// apiRequestOnce 单次请求；401 时刷新 token 后再试一次。
+func (d *Driver) apiRequestOnce(ctx context.Context, path string, body map[string]any, out any, allowedCodes ...int) error {
 	if err := d.waitOperationDelay(ctx); err != nil {
 		return err
 	}
@@ -237,6 +245,9 @@ func mapAPIError(code int, msg string) error {
 	switch code {
 	case 401, 403:
 		return domain.Errorf(domain.CodeAuthExpired, "光鸭认证失败：%s", msg)
+	case 127:
+		// 业务限流：操作过于频繁；归类为限流以便触发退避重试
+		return domain.Errorf(domain.CodeRateLimited, "光鸭接口限流：%s", msg)
 	case 429:
 		return domain.Errorf(domain.CodeRateLimited, "光鸭接口限流：%s", msg)
 	case 354:

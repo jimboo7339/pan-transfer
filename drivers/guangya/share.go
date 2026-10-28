@@ -133,6 +133,14 @@ var (
 // 关键：每次调用都会重新生成 did + traceparent（对齐 CASX _public_headers），
 // 因为广鸭服务端按 did 建立会话，固定 did 会导致分页请求被视为同一会话而忽略 page 参数。
 func (d *Driver) publicPostShare(ctx context.Context, path string, body map[string]any, out any) error {
+	// 分享接口同样会返回 127（操作过于频繁），限流时指数退避重试
+	return driver.RetryOnRateLimit(ctx, "guangya share "+path, func() error {
+		return d.publicPostShareOnce(ctx, path, body, out)
+	})
+}
+
+// publicPostShareOnce 单次分享接口请求。
+func (d *Driver) publicPostShareOnce(ctx context.Context, path string, body map[string]any, out any) error {
 	if err := d.waitOperationDelay(ctx); err != nil {
 		return err
 	}

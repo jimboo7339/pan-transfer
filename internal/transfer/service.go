@@ -67,6 +67,9 @@ type Options struct {
 // 多文件、轮询累加起来仍可能长时间挂起，这里给整体兜底。
 var runTimeout = 30 * time.Minute
 
+// linkInterval 同一任务内多条链接之间的间隔，避免背靠背突发请求触发平台限流。
+var linkInterval = 2 * time.Second
+
 type Service struct {
 	exec  Executor
 	st    *store.Store
@@ -450,11 +453,21 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger string) (*R
 	var trees []string
 	var lastErr error
 
-	for _, link := range links {
+	for i, link := range links {
 		select {
 		case <-ctx.Done():
 			return res, domain.Errorf(domain.CodeInternal, "运行中止：%v", friendlyRunErr(ctx.Err()))
 		default:
+		}
+		// 多链接之间留出间隔，避免连续突发请求触发平台限流（CASX 用独立任务+调度天然分散）
+		if i > 0 && linkInterval > 0 {
+			timer := time.NewTimer(linkInterval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return res, domain.Errorf(domain.CodeInternal, "运行中止：%v", friendlyRunErr(ctx.Err()))
+			case <-timer.C:
+			}
 		}
 		runID, err := s.st.CreateRun(ctx, taskID, link)
 		if err != nil {

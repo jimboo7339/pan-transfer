@@ -1,6 +1,10 @@
 package guangya
 
-import "testing"
+import (
+	"testing"
+
+	"pan-transfer/internal/domain"
+)
 
 // 光鸭分享链接的文件夹 fid 解析：支持 #/list/share/<fid> 与 fragment query。
 func TestExtractShareURL_FolderFid(t *testing.T) {
@@ -27,5 +31,22 @@ func TestExtractShareURL_FolderFid(t *testing.T) {
 				t.Errorf("pdir_fid = %q, want %q", got, c.want)
 			}
 		})
+	}
+}
+
+// 业务码 127（操作过于频繁）必须归类为限流，否则不会触发退避重试。
+func TestMapAPIErrorRateLimited(t *testing.T) {
+	limited := []int{127, 429, 354}
+	for _, code := range limited {
+		err := mapAPIError(code, "操作过于频繁，请稍后重试")
+		ae, ok := domain.AsAppError(err)
+		if !ok || ae.Code != domain.CodeRateLimited {
+			t.Errorf("mapAPIError(%d) = %v, want CodeRateLimited", code, err)
+		}
+	}
+	err := mapAPIError(500, "boom")
+	ae, ok := domain.AsAppError(err)
+	if !ok || ae.Code != domain.CodeDriverError {
+		t.Errorf("mapAPIError(500) = %v, want CodeDriverError", err)
 	}
 }
