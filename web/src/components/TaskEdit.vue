@@ -4,7 +4,7 @@ import { ref, reactive, inject, computed, watch } from 'vue'
 import Modal from './Modal.vue'
 import SharePreview from './SharePreview.vue'
 import FileBrowser from './FileBrowser.vue'
-import { accountApi, taskApi, ruleApi, settingsApi, cronApi } from '../api'
+import { accountApi, taskApi, ruleApi, settingsApi, cronApi, categoryApi } from '../api'
 import { CRON_PRESETS, cronToText } from '../cron'
 import WeekPicker from './WeekPicker.vue'
 import { extractShareFid, withShareFid, stripShareFid } from '../shareurl'
@@ -16,6 +16,7 @@ const saving = ref(false)
 const isEdit = ref(false)
 const accounts = ref([])
 const rules = ref([])
+const categories = ref([])
 
 const form = reactive({
   id: 0,
@@ -32,6 +33,7 @@ const form = reactive({
   end_date: '',
   update_subdir: '',
   start_fid: '',
+  category_id: 0,
   sort_index: 1,
   skip_history: 'global',
   run_mode: 'manual',
@@ -89,9 +91,10 @@ async function open(task) {
   visible.value = true
   isEdit.value = !!task
   try {
-    const [accs, rls, st] = await Promise.all([accountApi.list(), ruleApi.list(), settingsApi.get()])
+    const [accs, rls, st, cats] = await Promise.all([accountApi.list(), ruleApi.list(), settingsApi.get(), categoryApi.list().catch(() => [])])
     accounts.value = accs || []
     rules.value = rls || []
+    categories.value = cats || []
     globalSchedule.value = st
   } catch (e) {
     toast(e.message, 'error')
@@ -112,6 +115,7 @@ async function open(task) {
       end_date: task.end_date,
       update_subdir: task.update_subdir,
       start_fid: task.start_fid,
+      category_id: task.category_id || 0,
       sort_index: task.sort_index || 1,
       skip_history: task.skip_history || 'global',
       run_mode: task.run_mode || 'manual',
@@ -128,7 +132,7 @@ async function open(task) {
       id: 0, task_name: '', account_id: accounts.value[0]?.id || 0,
       links: [''], save_path: '', pattern: '', replace: '',
       ignore_extension: true, run_week: '', run_time: '', run_cron: '', end_date: '',
-      update_subdir: '', start_fid: '', sort_index: 1, skip_history: 'global',
+      update_subdir: '', start_fid: '', category_id: 0, sort_index: 1, skip_history: 'global',
       run_mode: 'manual', status: 'running',
     })
     scheduleMode.value = 'manual'
@@ -287,15 +291,23 @@ async function save() {
               </div>
             </div>
 
-            <div class="field">
-              <div class="field-label">跳过已转存历史</div>
-              <div class="flex" style="gap: 10px">
-                <select class="select" v-model="form.skip_history" style="max-width: 200px">
+            <div class="form-row">
+              <div class="field">
+                <div class="field-label">任务分类（回调分组）</div>
+                <select class="select" v-model="form.category_id">
+                  <option :value="0">未分类（不参与回调）</option>
+                  <option v-for="c in categories" :key="c.id" :value="c.id">{{ c.name }}{{ c.callback_enabled ? '' : '（仅分组）' }}</option>
+                </select>
+                <div class="field-hint" style="margin-top: 4px">分类的回调接口在「设置 → 任务分类与回调」配置。</div>
+              </div>
+              <div class="field">
+                <div class="field-label">跳过已转存历史</div>
+                <select class="select" v-model="form.skip_history">
                   <option value="global">跟随全局</option>
                   <option value="on">强制开</option>
                   <option value="off">强制关</option>
                 </select>
-                <span class="field-hint" style="margin-top: 0">按转存历史去重，防止重复转存；开启「清理源文件」类工作流时建议强制开。</span>
+                <div class="field-hint" style="margin-top: 4px">按转存历史去重，防止重复转存。</div>
               </div>
             </div>
           </div>

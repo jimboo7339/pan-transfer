@@ -24,6 +24,7 @@ type DramaTask struct {
 	UpdateSubdir            string
 	UpdateSubdirResaveMode  string
 	StartFID                string
+	CategoryID              int64  // 任务分类（0=未分类）；分类可配置转存完成后的回调
 	SortIndex               int
 	SkipHistory             string // global/on/off：是否按转存历史跳过已保存文件
 	RunMode                 string // manual/global/custom：manual=仅手动，global=用全局调度，custom=用本任务 RunWeek/RunTime

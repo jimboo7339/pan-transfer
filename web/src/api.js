@@ -71,6 +71,14 @@ export const taskApi = {
   clearSavedNames: (id) => api.del(`/api/tasks/${id}/saved-names`),
 }
 
+export const categoryApi = {
+  list: () => api.get('/api/categories'),
+  save: (d) => api.post('/api/categories', d),
+  remove: (id) => api.del(`/api/categories/${id}`),
+  test: (id) => api.post(`/api/categories/${id}/test`),
+  logs: (id, limit = 20) => api.get(`/api/categories/${id}/callback-logs?limit=${limit}`),
+}
+
 export const shareApi = {
   preview: (d) => api.post('/api/share/preview', d),
 }

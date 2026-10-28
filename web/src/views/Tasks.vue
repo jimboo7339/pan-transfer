@@ -3,23 +3,27 @@
 import { ref, inject, onMounted } from 'vue'
 import TaskEdit from '../components/TaskEdit.vue'
 import TaskRuns from '../components/TaskRuns.vue'
-import { taskApi, accountApi, fmtTime } from '../api'
+import { taskApi, accountApi, categoryApi, fmtTime } from '../api'
 import { cronToText } from '../cron'
 
 const toast = inject('toast')
 
 const tasks = ref([])
 const accounts = ref([])
+const categories = ref([])
 const loading = ref(true)
 const editRef = ref(null)
 const runsRef = ref(null)
 const runningIds = ref(new Set())
 
+const catName = (id) => categories.value.find(c => c.id === id)?.name || ''
+
 async function reload() {
   try {
-    const [ts, accs] = await Promise.all([taskApi.list(), accountApi.list()])
+    const [ts, accs, cats] = await Promise.all([taskApi.list(), accountApi.list(), categoryApi.list().catch(() => [])])
     tasks.value = ts || []
     accounts.value = accs || []
+    categories.value = cats || []
   } catch (e) {
     toast(e.message, 'error')
   } finally {
@@ -131,6 +135,7 @@ const statusBadge = (t) => {
           </span>
           <span class="tag">{{ accountType(t.account_id) }} · {{ accountName(t.account_id) }}</span>
           <span v-if="t.links.length > 1" class="tag">多源 ×{{ t.links.length }}</span>
+          <span v-if="t.category_id" class="tag" :title="'分类回调：' + catName(t.category_id)">📁 {{ catName(t.category_id) }}</span>
           <span v-if="t.ignore_extension" class="tag">忽略后缀</span>
         </div>
         <div class="task-info">

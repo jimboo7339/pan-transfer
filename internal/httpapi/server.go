@@ -56,6 +56,7 @@ func (s *Server) Handler() http.Handler { return s.mux }
 
 func (s *Server) routes() {
 	m := s.mux
+	s.registerCategoryRoutes()
 
 	// 认证
 	m.HandleFunc("POST /api/auth/login", s.handleLogin)
@@ -573,6 +574,7 @@ type taskIn struct {
 	EndDate         string   `json:"end_date"`
 	UpdateSubdir    string   `json:"update_subdir"`
 	StartFID        string   `json:"start_fid"`
+	CategoryID      int64    `json:"category_id"`
 	SortIndex       int      `json:"sort_index"`
 	SkipHistory     string   `json:"skip_history"`
 	RunMode         string   `json:"run_mode"` // manual/global/custom
@@ -594,6 +596,7 @@ func (in *taskIn) toTask() *domain.DramaTask {
 		EndDate:         in.EndDate,
 		UpdateSubdir:    in.UpdateSubdir,
 		StartFID:        in.StartFID,
+		CategoryID:      in.CategoryID,
 		SortIndex:       in.SortIndex,
 		SkipHistory:     in.SkipHistory,
 		RunMode:         in.RunMode,
@@ -619,6 +622,7 @@ func taskOut(t *domain.DramaTask) map[string]any {
 		"end_date":         t.EndDate,
 		"update_subdir":    t.UpdateSubdir,
 		"start_fid":        t.StartFID,
+		"category_id":      t.CategoryID,
 		"sort_index":       t.SortIndex,
 		"skip_history":     t.SkipHistory,
 		"run_mode":         transfer.EffectiveRunMode(t),

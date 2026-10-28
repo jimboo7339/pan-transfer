@@ -80,6 +80,11 @@ type Service struct {
 	lastTrigger map[int64]string // 任务 ID -> 上次触发的分钟窗口（防同分钟重复触发）
 	schedSem    chan struct{}    // 定时运行全局并发上限，避免同时到点的任务瞬间打出大量网盘请求
 	lastPrune   string           // 上次清理运行记录的日期（YYYY-MM-DD），每天最多清一次
+
+	roundMu  sync.Mutex
+	rounds   map[int64]*callbackRound // 分类 ID -> 进行中的回调轮次（内存态，重启丢失）
+	roundSeq int64                    // 轮次自增 ID
+
 	appCtx      context.Context
 	cancel      context.CancelFunc
 }
@@ -99,6 +104,7 @@ func New(opts Options) *Service {
 		running:     map[int64]struct{}{},
 		lastTrigger: map[int64]string{},
 		schedSem:    make(chan struct{}, 2),
+		rounds:      map[int64]*callbackRound{},
 		appCtx:      ctx,
 		cancel:      cancel,
 	}
@@ -264,6 +270,9 @@ func (s *Service) sweep() {
 		s.lastTrigger[t.ID] = window
 		s.schedMu.Unlock()
 
+		// 分类轮次回调：在随机延迟前入轮，避免先跑完的任务把轮次提前关闭
+		s.joinCategoryRound(t)
+
 		go func(taskID int64) {
 			select {
 			case <-ctx.Done():
@@ -408,6 +417,13 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger string) (*R
 	ctx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
 
+	// 分类回调：加入轮次（幂等，手动运行在此入轮；定时触发已在 sweep 决定时入轮）
+	s.joinCategoryRound(t)
+	res := &RunResult{TaskID: taskID}
+	var allNames []string
+	// 结算放在 defer：跳过/无链接/超时/中止等所有退出路径都能结算轮次或触发回调
+	defer func() { s.settleCategory(t, res, allNames, trigger) }()
+
 	links := LinksOf(t)
 	if len(links) == 0 {
 		return nil, domain.Errorf(domain.CodeValidation, "任务没有配置分享链接")
@@ -431,8 +447,6 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger string) (*R
 	}
 	useHistory := s.skipHistoryEnabled(ctx, t)
 
-	res := &RunResult{TaskID: taskID}
-	var allNames []string
 	var trees []string
 	var lastErr error
 
