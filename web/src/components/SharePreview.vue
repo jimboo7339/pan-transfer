@@ -1,6 +1,6 @@
 <script setup>
 // 分享链接预览弹窗：目录导航 + 重命名预览（对应 CASX 的"分享链接预览"）。
-import { ref, inject, computed } from 'vue'
+import { ref, inject, computed, watch } from 'vue'
 import Modal from './Modal.vue'
 import { shareApi, fmtSize, fmtTime } from '../api'
 import { extractShareFid, stripShareFid } from '../shareurl'
@@ -18,6 +18,8 @@ const truncated = ref(false)
 const curDirName = ref('根目录')
 const loadError = ref('')
 const filter = ref('all') // all | todo | saved 转存状态筛选
+const page = ref(1)       // 当前页（客户端分页）
+const pageSize = ref(50)  // 每页条数
 
 // name_saved 承载三类含义：已存在文件名 / "起始及之前" / "重命名冲突（保留最大）"
 function savedKind(it) {
@@ -45,6 +47,35 @@ const shownItems = computed(() => {
   return items.value
 })
 
+const pageCount = computed(() => Math.max(1, Math.ceil(shownItems.value.length / pageSize.value)))
+const pagedItems = computed(() => {
+  const start = (page.value - 1) * pageSize.value
+  return shownItems.value.slice(start, start + pageSize.value)
+})
+const pageInfo = computed(() => {
+  const total = shownItems.value.length
+  if (!total) return ''
+  const start = (page.value - 1) * pageSize.value + 1
+  const end = Math.min(page.value * pageSize.value, total)
+  return `第 ${start}–${end} 项 / 共 ${total} 项`
+})
+
+function goPage(p) {
+  if (p < 1 || p > pageCount.value) return
+  page.value = p
+}
+
+function onPageSizeChange() {
+  page.value = 1
+}
+
+// 筛选条件变化时回到第一页
+watch(filter, () => { page.value = 1 })
+// 数据或每页条数变化后，页码越界则回落到最后一页
+watch([shownItems, pageSize], () => {
+  if (page.value > pageCount.value) page.value = pageCount.value
+})
+
 // 预览参数（父组件通过 open 传入）
 let params = null
 const emit = defineEmits(['use-folder'])
@@ -66,12 +97,13 @@ async function load(fid) {
   loading.value = true
   loadError.value = ''
   try {
-    const res = await shareApi.preview({ ...params, pdir_fid: fid, max_items: 500 })
+    const res = await shareApi.preview({ ...params, pdir_fid: fid, max_items: 2000 })
     items.value = res.items || []
     pwdID.value = res.pwd_id
     pdirFID.value = res.pdir_fid
     total.value = res.total
     truncated.value = res.truncated
+    page.value = 1
   } catch (e) {
     toast(e.message, 'error')
     loadError.value = e.message
@@ -179,7 +211,7 @@ function useCurrentFolder() {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="it in shownItems" :key="it.fid" :class="{
+                <tr v-for="it in pagedItems" :key="it.fid" :class="{
                   'row-saved': savedKind(it) === 'saved',
                   'row-conflict': savedKind(it) === 'conflict',
                   'row-skip': savedKind(it) === 'skip',
@@ -212,6 +244,23 @@ function useCurrentFolder() {
             <div v-if="!shownItems.length" class="empty" style="padding: 18px">
               <div class="empty-title">该状态下没有条目</div>
             </div>
+          </div>
+          <!-- 分页：目录很大时避免一次渲染上千行 -->
+          <div v-if="!loadError && shownItems.length" class="flex mt-16" style="flex-wrap: wrap; gap: 8px; align-items: center">
+            <span class="muted" style="font-size: 12.5px">{{ pageInfo }}</span>
+            <span class="flex-1"></span>
+            <select class="select" style="width: auto; height: 30px; font-size: 12.5px" v-model.number="pageSize" @change="onPageSizeChange">
+              <option :value="10">10 / 页</option>
+              <option :value="20">20 / 页</option>
+              <option :value="50">50 / 页</option>
+              <option :value="100">100 / 页</option>
+              <option :value="200">200 / 页</option>
+            </select>
+            <button class="btn btn-sm" :disabled="page <= 1" @click="goPage(1)">«</button>
+            <button class="btn btn-sm" :disabled="page <= 1" @click="goPage(page - 1)">上一页</button>
+            <span class="mono" style="font-size: 12.5px; min-width: 56px; text-align: center">{{ page }} / {{ pageCount }}</span>
+            <button class="btn btn-sm" :disabled="page >= pageCount" @click="goPage(page + 1)">下一页</button>
+            <button class="btn btn-sm" :disabled="page >= pageCount" @click="goPage(pageCount)">»</button>
           </div>
           <div v-if="truncated" class="field-hint mt-8">⚠ 条目过多，仅展示前 {{ items.length }} 项（原 {{ total }} 项）。</div>
         </div>

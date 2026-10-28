@@ -149,7 +149,7 @@ func previewShareWithDriver(ctx context.Context, drv driver.Driver, in PreviewSh
 	totalFromDriver := len(shareItems)
 	maxItems := in.MaxItems
 	if maxItems <= 0 {
-		maxItems = 500
+		maxItems = 2000
 	}
 	truncated := false
 	if len(shareItems) > maxItems {
