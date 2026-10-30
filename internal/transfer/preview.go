@@ -35,7 +35,7 @@ type PreviewShareInput struct {
 type PreviewShareItem struct {
 	FID           string `json:"fid"`
 	FIDToken      string `json:"fid_token"`
-	Name          string `json:"name"` // 原始名
+	Name          string `json:"name"`    // 原始名
 	NameRe        string `json:"name_re"` // 重命名后的目标名；为空表示不参与转存
 	IsDir         bool   `json:"is_dir"`
 	UpdatedAt     int64  `json:"updated_at"`
@@ -80,6 +80,8 @@ func (s *Service) PreviewShare(ctx context.Context, in PreviewShareInput) (*Prev
 	if err != nil {
 		return nil, err
 	}
+	// 预览是只读：复用短 TTL 缓存，刚运行过或刚预览过的同一目录不再重复翻页拉取
+	ctx = driver.WithDirCache(ctx, s.dirCache)
 
 	var result *PreviewShareResult
 	err = s.exec.Run(ctx, in.AccountID, func(drv driver.Driver) error {
@@ -121,8 +123,8 @@ func previewShareWithDriver(ctx context.Context, drv driver.Driver, in PreviewSh
 		pdirFID = urlPdirFID
 	}
 
-	// 4. 拉取分享目录一级条目（来自Trae）
-	shareItems, err := st.ListShareItems(ctx, pwdID, stoken, pdirFID)
+	// 4. 拉取分享目录一级条目（来自Trae；短 TTL 缓存复用，预览/运行之间共享）
+	shareItems, _, err := driver.ListShareItemsCached(ctx, st, in.AccountID, pwdID, stoken, pdirFID)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +174,7 @@ func previewShareWithDriver(ctx context.Context, drv driver.Driver, in PreviewSh
 	if path := strings.TrimSpace(in.SavePath); path != "" {
 		normalized := regexp.MustCompile(`/+`).ReplaceAllString("/"+path, "/")
 		if pathFIDs, err := st.ResolvePathToFID(ctx, []string{normalized}); err == nil && len(pathFIDs) > 0 && strings.TrimSpace(pathFIDs[0].FID) != "" {
-			if destItems, err := drv.ListFiles(ctx, pathFIDs[0].FID); err == nil {
+			if destItems, _, err := driver.ListFilesCached(ctx, drv, in.AccountID, pathFIDs[0].FID); err == nil {
 				for _, it := range destItems {
 					if !it.IsDir && it.Name != "" {
 						destFileNames = append(destFileNames, it.Name)

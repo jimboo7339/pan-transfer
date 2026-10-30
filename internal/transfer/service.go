@@ -84,12 +84,16 @@ type Service struct {
 	schedSem    chan struct{}    // 定时运行全局并发上限，避免同时到点的任务瞬间打出大量网盘请求
 	lastPrune   string           // 上次清理运行记录的日期（YYYY-MM-DD），每天最多清一次
 
+	// dirCache 目录/分享列表短 TTL 缓存：同一轮运行内与紧邻的预览-运行之间复用列表，
+	// 避免同一目录被反复翻页拉取（慢且容易触发平台限流）
+	dirCache *driver.DirCache
+
 	roundMu  sync.Mutex
 	rounds   map[int64]*callbackRound // 分类 ID -> 进行中的回调轮次（内存态，重启丢失）
 	roundSeq int64                    // 轮次自增 ID
 
-	appCtx      context.Context
-	cancel      context.CancelFunc
+	appCtx context.Context
+	cancel context.CancelFunc
 }
 
 // New 构造服务。
@@ -107,6 +111,7 @@ func New(opts Options) *Service {
 		running:     map[int64]struct{}{},
 		lastTrigger: map[int64]string{},
 		schedSem:    make(chan struct{}, 2),
+		dirCache:    driver.NewDirCache(driver.DefaultDirCacheTTL),
 		rounds:      map[int64]*callbackRound{},
 		appCtx:      ctx,
 		cancel:      cancel,
@@ -419,6 +424,7 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger string) (*R
 	// 单次运行总超时：整体兜底，防止网络/上游异常导致运行长时间挂起
 	ctx, cancel := context.WithTimeout(ctx, runTimeout)
 	defer cancel()
+	ctx = driver.WithDirCache(ctx, s.dirCache)
 
 	// 分类回调：加入轮次（幂等，手动运行在此入轮；定时触发已在 sweep 决定时入轮）
 	s.joinCategoryRound(t)

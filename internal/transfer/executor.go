@@ -147,10 +147,13 @@ func (e *DramaExecutor) Execute(ctx context.Context) (string, error) {
 	}
 	e.line("目标目录 fid: " + destFID)
 
-	// 4. 列出目标目录已有文件（来自Trae）
-	destItems, err := e.drv.ListFiles(ctx, destFID)
+	// 4. 列出目标目录已有文件（来自Trae；短 TTL 缓存复用，避免同一轮反复翻页拉取）
+	destItems, cached, err := driver.ListFilesCached(ctx, e.drv, e.task.AccountID, destFID)
 	if err != nil {
 		return "", wrapDriverErr(err)
+	}
+	if cached {
+		e.line("目标目录列表：复用缓存（30 秒内未重新拉取）")
 	}
 	destFileNames := make([]string, 0, len(destItems))
 	destDirMap := make(map[string]string) // name -> fid
@@ -175,9 +178,12 @@ func (e *DramaExecutor) Execute(ctx context.Context) (string, error) {
 
 	// 5. 读取分享列表（来自Trae）
 	e.section("读取分享列表")
-	shareItems, err := e.st.ListShareItems(ctx, pwdID, stoken, pdirFID)
+	shareItems, shareCached, err := driver.ListShareItemsCached(ctx, e.st, e.task.AccountID, pwdID, stoken, pdirFID)
 	if err != nil {
 		return "", err
+	}
+	if shareCached {
+		e.line("分享列表：复用缓存（30 秒内未重新拉取）")
 	}
 	e.line(fmt.Sprintf("分享列表项数: %d", len(shareItems)))
 
@@ -201,6 +207,8 @@ func (e *DramaExecutor) Execute(ctx context.Context) (string, error) {
 		if err != nil {
 			return tree.String(), err
 		}
+		// 已向目标目录写入文件：让目录列表缓存失效，后续（本链接重命名校验、下一条链接）必须重新拉取
+		driver.InvalidateDirCache(ctx, e.task.AccountID, destFID)
 		// 8. 重命名（来自Trae）
 		e.section("重命名")
 		e.renameFiles(ctx, savedFIDs, plan, destFID)
@@ -218,6 +226,8 @@ func (e *DramaExecutor) Execute(ctx context.Context) (string, error) {
 	if strings.TrimSpace(e.task.UpdateSubdir) != "" {
 		e.section("子目录转存")
 		e.syncSubdirs(ctx, pwdID, stoken, shareItems, destFID, destDirMap, tree)
+		// 同步可能向根目录写入，缓存失效
+		driver.InvalidateDirCache(ctx, e.task.AccountID, destFID)
 	}
 
 	return tree.String(), nil
@@ -250,7 +260,7 @@ func (e *DramaExecutor) ensureDestDir(ctx context.Context, savePath string) (str
 			continue
 		}
 		// 检查是否已存在
-		items, err := e.drv.ListFiles(ctx, parentID)
+		items, _, err := driver.ListFilesCached(ctx, e.drv, e.task.AccountID, parentID)
 		if err != nil {
 			return "", wrapDriverErr(err)
 		}
@@ -555,7 +565,8 @@ func (e *DramaExecutor) renameFiles(ctx context.Context, savedFIDs []string, pla
 	}
 
 	// 二次校验：列出目录检查是否真的改名成功（来自Trae）
-	items, err := e.drv.ListFiles(ctx, destFID)
+	driver.InvalidateDirCache(ctx, e.task.AccountID, destFID) // 刚发生过改名，缓存必须失效
+	items, _, err := driver.ListFilesCached(ctx, e.drv, e.task.AccountID, destFID)
 	if err != nil {
 		e.line("INFO: 重命名校验失败，无法读取目标目录")
 		return
@@ -658,15 +669,15 @@ func (e *DramaExecutor) syncShareDir(ctx context.Context, pwdID, stoken, shareDi
 		return
 	}
 
-	// 拉取分享子目录内容（来自Trae）
-	shareItems, err := e.st.ListShareItems(ctx, pwdID, stoken, shareDirFID)
+	// 拉取分享子目录内容（来自Trae；短 TTL 缓存复用）
+	shareItems, _, err := driver.ListShareItemsCached(ctx, e.st, e.task.AccountID, pwdID, stoken, shareDirFID)
 	if err != nil {
 		e.line(fmt.Sprintf("FAIL: 读取分享子目录失败: %v", err))
 		return
 	}
 
 	// 拉取目标目录内容（来自Trae）
-	destItems, err := e.drv.ListFiles(ctx, destDirFID)
+	destItems, _, err := driver.ListFilesCached(ctx, e.drv, e.task.AccountID, destDirFID)
 	if err != nil {
 		e.line(fmt.Sprintf("FAIL: 读取目标子目录失败: %v", err))
 		return
