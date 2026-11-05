@@ -95,10 +95,14 @@ func (e shareFileEntry) pickIsDir() bool {
 	return e.ResType == 2
 }
 
-// shareListData 是 get_share_page_files_list 的 data（来自Trae）
+// shareListData 是 get_share_page_files_list 的 data（来自Trae）。
+// 光鸭该接口是【游标分页】：响应带 cursor（下次起点）与 hasMore，page 参数被服务端忽略；
+// 必须把上次返回的 cursor 作为下次请求的 cursor 才能翻页，否则永远只拿到第一页 50 条。
 type shareListData struct {
-	List  []shareFileEntry `json:"list"`
-	Total int              `json:"total"`
+	List    []shareFileEntry `json:"list"`
+	Total   int              `json:"total"`
+	Cursor  int              `json:"cursor"`
+	HasMore bool             `json:"hasMore"`
 }
 
 // shareRestoreData 是 restore_share 的返回（来自Trae）
@@ -359,27 +363,27 @@ func (d *Driver) ListShareItems(ctx context.Context, pwdID, stoken, pdirFID stri
 
 	var merged []driver.ShareEntry
 	seen := make(map[string]struct{})
+	cursor := 0
 	for page := 1; ; page++ {
-		var data shareListData
-		if err := d.publicPostShare(ctx, pathShareFilesList, map[string]any{
+		body := map[string]any{
 			"accessToken": access,
 			"parentId":    parentID,
 			"page":        page,
 			"pageSize":    50,
 			"orderBy":     0,
 			"sortType":    0,
-		}, &data); err != nil {
+		}
+		// 关键：光鸭按 cursor 翻页；首次不传（或传 0），后续传上次响应的 cursor。
+		// 若只依赖 page，服务端会一直返回第一页，超过 50 条的文件全部丢失。
+		if cursor > 0 {
+			body["cursor"] = cursor
+		}
+		var data shareListData
+		if err := d.publicPostShare(ctx, pathShareFilesList, body, &data); err != nil {
 			return nil, err
 		}
 		if len(data.List) == 0 {
 			break
-		}
-		// 服务端分页失效兜底：若本页首条 fid 已见过，说明服务端忽略 page 参数
-		// 重复返回同一批数据，立即停止，防止累积上万条重复项（来自Trae）
-		if first := data.List[0].toShareItem(); first.FID != "" {
-			if _, ok := seen[first.FID]; ok {
-				break
-			}
 		}
 		newCount := 0
 		for _, e := range data.List {
@@ -394,16 +398,19 @@ func (d *Driver) ListShareItems(ctx context.Context, pwdID, stoken, pdirFID stri
 			merged = append(merged, si)
 			newCount++
 		}
-		// 本页无新增 fid，同样视为服务端分页失效（来自Trae）
+		// 服务端分页失效兜底：本页没有新 fid（重复返回同一批），立即停止防止死循环
 		if newCount == 0 {
 			break
 		}
-		if data.Total > 0 && len(merged) >= data.Total {
+		// 已取满 total 或服务端明确没有下一页
+		if (data.Total > 0 && len(merged) >= data.Total) || !data.HasMore {
 			break
 		}
-		if len(data.List) < 50 {
+		// cursor 未前进（异常响应）时停止，避免死循环
+		if data.Cursor <= cursor {
 			break
 		}
+		cursor = data.Cursor
 		if page > 200 {
 			break
 		}

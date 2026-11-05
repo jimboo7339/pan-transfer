@@ -15,7 +15,6 @@ import (
 
 const (
 	accountBaseURL = "https://account.guangyapan.com"
-	apiBaseURL     = "https://api.guangyapan.com"
 	webBaseURL     = "https://www.guangyapan.com"
 
 	pathUserMe           = "/v1/user/me"
@@ -41,6 +40,9 @@ const (
 
 	defaultClientID = "aMe-8VSlkrbQXpUR"
 )
+
+// apiBaseURL 抽成变量，便于单测用 httptest 模拟分页响应；生产环境为官方地址。
+var apiBaseURL = "https://api.guangyapan.com"
 
 func (d *Driver) apiBase() string { return apiBaseURL }
 
