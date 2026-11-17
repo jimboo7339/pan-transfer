@@ -1,8 +1,7 @@
 # PanTransfer NAS / 服务器部署
-# 用法: docker compose up -d   （镜像名换成你自己的，见 README 部署章节）
 services:
   pan-transfer:
-    image: ghcr.io/OWNER/pan-transfer:latest   # ← 改成你的 ghcr 用户名/仓库名，或本地导入的镜像 tag
+    image: ghcr.io/jimboo7339/pan-transfer:latest   
     container_name: pan-transfer
     restart: unless-stopped
     ports:
