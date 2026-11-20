@@ -293,6 +293,45 @@ code, pre { font-family: var(--mono); }
 
 .grid-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
 
+/* ---------- 任务筛选工具栏 ---------- */
+.filter-bar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 12px 14px; margin-bottom: 18px;
+}
+.filter-item { display: flex; align-items: center; gap: 8px; }
+.filter-item .select { width: auto; min-width: 132px; height: 34px; font-size: 13px; }
+.filter-label { font-size: 12.5px; color: var(--text-3); white-space: nowrap; flex-shrink: 0; }
+.filter-search {
+  position: relative; flex: 1 1 240px; min-width: 180px;
+}
+.filter-search svg {
+  position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
+  width: 15px; height: 15px; color: var(--text-3); pointer-events: none;
+}
+.filter-search .input { width: 100%; height: 34px; font-size: 13px; padding-left: 34px; }
+.filter-reset { margin-left: auto; color: var(--text-3); }
+
+/* ---------- 任务分区（运行中 / 已暂停） ---------- */
+.task-section + .task-section { margin-top: 24px; }
+.section-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.section-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.section-dot.dot-running { background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
+.section-dot.dot-paused { background: var(--text-3); box-shadow: 0 0 0 3px var(--surface-2); }
+.section-title { font-size: 14.5px; font-weight: 600; margin: 0; color: var(--text); }
+.section-count {
+  font-size: 12px; font-weight: 600; color: var(--text-2);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 999px; padding: 1px 8px; min-width: 20px; text-align: center;
+}
+.section-empty {
+  font-size: 12.5px; color: var(--text-3);
+  border: 1px dashed var(--border-strong); border-radius: var(--radius);
+  padding: 16px; text-align: center; background: var(--surface-2);
+}
+/* 已暂停的任务卡片弱化视觉，便于与运行中区分 */
+.task-card-paused { opacity: 0.82; }
+.task-card-paused:hover { opacity: 1; }
+
 /* 链接列表编辑 */
 .link-item { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
 .link-item .input { flex: 1; min-width: 0; }
@@ -465,6 +504,14 @@ html.dark .toast-error { background: #7f1d1d; }
   .page-desc { font-size: 12.5px; }
   .grid-cards { grid-template-columns: minmax(0, 1fr); }
   .grid-cards > * { min-width: 0; }
+
+  /* 筛选栏在移动端竖排铺满 */
+  .filter-bar { gap: 10px; padding: 12px; margin-bottom: 16px; }
+  .filter-search { flex: 1 1 100%; }
+  .filter-item { flex: 1 1 100%; }
+  .filter-item .select { flex: 1; width: 100%; min-width: 0; height: 40px; font-size: 16px; }
+  .filter-label { width: 64px; }
+  .filter-reset { margin-left: 0; }
 
   .form-row, .form-row-3 { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .week-day { width: auto; flex: 1 1 0; min-width: 0; }
