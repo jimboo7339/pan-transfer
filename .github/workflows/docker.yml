@@ -187,19 +187,24 @@ jobs:
           VERSION="${GITHUB_REF_NAME}"
           NOTES_FILE="${GITHUB_WORKSPACE}/RELEASE_NOTES.md"
 
-          # 上一个 tag：找 <当前 tag>^ 上最近的 tag。找不到就留空（首次发版）。
-          PREV_TAG=$(git describe --tags --abbrev=0 "${VERSION}^" 2>/dev/null || true)
-          if [ -z "$PREV_TAG" ]; then
-            PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
-          fi
+          # 上一个 tag：不用 git describe（它在 tag push 场景的 HEAD^ 上
+          # 经常找不到 tag，尤其在浅克隆/单 tag checkout 下），
+          # 而是显式列出所有 tag 并取版本序在前一个。这样行为可预测。
+          VERSION="${GITHUB_REF_NAME}"
+          PREV_TAG=$(git tag --list --sort=version:refname | awk -v v="$VERSION" '
+            $0 == v { if (prev != "") print prev; exit }
+            { prev = $0 }
+          ')
 
           if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "$VERSION" ]; then
             RANGE="${PREV_TAG}..${VERSION}"
-            RANGE_LABEL="`git log -1 --pretty=%h ${PREV_TAG}`..`git log -1 --pretty=%h ${VERSION}`"
+            RANGE_LABEL="${PREV_TAG}..${VERSION}"
           else
+            # 首次发版（没有更早的 tag）：列出全部提交
             RANGE="$VERSION"
             RANGE_LABEL="全部提交"
           fi
+          echo "PREV_TAG=$PREV_TAG  RANGE=$RANGE"
 
           {
             echo "## 变更"
