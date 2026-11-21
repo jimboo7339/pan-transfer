@@ -319,8 +319,19 @@ function saveSchedule() {
 const pwdModal = ref(false)
 const pwd = ref('')
 const pwd2 = ref('')
+// 与界面文案「至少 4 位」保持一致。
+//
+// 早先只校验两次输入一致，不校验长度：用户填 1 位密码也能保存成功，
+// 而后端登录限流是 5 次 / 5 分钟——1 位口令在限流下也能被很快试出来。
+// 文案承诺了约束，代码就该真的执行。
+const MIN_PASSWORD_LEN = 4
+
 async function savePassword() {
   if (pwd.value !== pwd2.value) { toast('两次输入的密码不一致', 'error'); return }
+  if (pwd.value.length < MIN_PASSWORD_LEN) {
+    toast(`密码至少 ${MIN_PASSWORD_LEN} 位`, 'error')
+    return
+  }
   await persist({ password: pwd.value })
   pwd.value = pwd2.value = ''
   pwdModal.value = false
@@ -616,7 +627,7 @@ const newestBackup = computed(() => backups.value[0] || null)
             <div class="page-desc">
               备份包含账号凭据、任务、运行记录与转存历史（<b>凭据是加密后的密文</b>，
               但与主密钥一起才能用；<code class="mono">master.key</code> 也要一并保存）。
-              服务每天自动备份一次，保留最近 {{ backups.length ? '7' : '7' }} 份。
+              服务每天自动备份一次，保留最近 7 份。
             </div>
           </div>
           <span class="flex-1"></span>
