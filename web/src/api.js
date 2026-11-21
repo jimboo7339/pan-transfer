@@ -20,13 +20,24 @@ async function request(method, url, body) {
     resp = await fetch(url, opts)
     data = await resp.json()
   } catch (e) {
-    throw new Error('网络请求失败：' + e.message)
+    // 区分「网络断了」和「服务器返回了非 JSON（通常是反代错误页）」：
+    // 前者值得自动重试一次，后者重试无意义且会掩盖真实问题。
+    const err = new Error('网络请求失败：' + e.message)
+    err.kind = 'network'
+    throw err
   }
   if (!resp.ok) {
     const msg = data && data.error ? data.error.message : `HTTP ${resp.status}`
     if (resp.status === 401 && onUnauthorized) onUnauthorized()
     const err = new Error(msg)
     err.code = data && data.error ? data.error.code : ''
+    // 错误分类让 UI 能决定「重试 / 重新登录 / 就地提示」，
+    // 而不是一律弹一个 toast（401 时用户看到"HTTP 401"并不知道要重登）。
+    if (resp.status === 401) err.kind = 'auth'
+    else if (resp.status === 400) err.kind = 'validation'
+    else if (resp.status >= 500) err.kind = 'server'
+    else err.kind = 'request'
+    err.status = resp.status
     throw err
   }
   return data && 'data' in data ? data.data : data
@@ -44,6 +55,9 @@ export const api = {
 export const authApi = {
   status: () => api.get('/api/auth/status'),
   login: (password) => api.post('/api/auth/login', { password }),
+  // 登出会让服务端作废此前签发的全部会话（递增会话版本），
+  // 因为 token 是无状态的，只清 Cookie 无法让已泄露的 token 失效。
+  logout: () => api.post('/api/auth/logout'),
 }
 
 export const accountApi = {
@@ -103,6 +117,14 @@ export const cronApi = {
 export const settingsApi = {
   get: () => api.get('/api/settings'),
   save: (d) => api.put('/api/settings', d),
+}
+
+export const backupApi = {
+  list: () => api.get('/api/backup'),
+  create: () => api.post('/api/backup'),
+  // 下载走原生链接（附件下载），避免把二进制塞进 JSON 客户端。
+  downloadUrl: (name) => `/api/backup/download${name ? '?name=' + encodeURIComponent(name) : ''}`,
+  restore: (name) => api.post('/api/restore', { name }),
 }
 
 export const notifyApi = {

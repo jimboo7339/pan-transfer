@@ -73,7 +73,12 @@ func (d *Driver) matchMparamFromCookie(cookie string) map[string]string {
 	return out
 }
 
-func (d *Driver) apiBase() string { return baseURL }
+func (d *Driver) apiBase() string {
+	if d.testBase != "" {
+		return d.testBase
+	}
+	return baseURL
+}
 
 func (d *Driver) rootID() string {
 	if id := strings.TrimSpace(d.add.RootFolderID); id != "" {
@@ -98,8 +103,16 @@ type quarkEnvelope struct {
 	Metadata json.RawMessage `json:"metadata"`
 }
 
+// apiRequest 发起夸克接口请求；限流（HTTP 429 / 业务 status=429）自动指数退避重试。
+// 与光鸭 transport.go 的 apiRequest 同构，此前夸克缺少这层包装。
 func (d *Driver) apiRequest(ctx context.Context, method, path string, query url.Values, body, out any) (*quarkEnvelope, error) {
-	return d.apiRequestTo(ctx, d.apiBase(), method, path, query, body, out)
+	var env *quarkEnvelope
+	err := driver.RetryOnRateLimit(ctx, "quark "+method+" "+path, func() error {
+		var e error
+		env, e = d.apiRequestTo(ctx, d.apiBase(), method, path, query, body, out)
+		return e
+	})
+	return env, err
 }
 
 func (d *Driver) apiRequestTo(ctx context.Context, apiBase, method, path string, query url.Values, body, out any) (*quarkEnvelope, error) {
@@ -168,6 +181,10 @@ func (d *Driver) apiRequestTo(ctx context.Context, apiBase, method, path string,
 		return nil, domain.Errorf(domain.CodeAuthExpired, "夸克 Cookie 认证失败，请重新获取 Cookie")
 	case resp.StatusCode == http.StatusForbidden:
 		return nil, domain.Errorf(domain.CodePermissionDenied, "夸克访问被拒绝，Cookie 权限不足: HTTP %d", resp.StatusCode)
+	case resp.StatusCode == http.StatusTooManyRequests:
+		// 限流：交给 apiRequestWithRetry 的 RetryOnRateLimit 做指数退避重试。
+		// 必须映射到 CodeRateLimited，否则会被下面的 >=400 分支降级成普通驱动错误。
+		return nil, domain.Errorf(domain.CodeRateLimited, "夸克操作过于频繁（HTTP 429）：%s", httpx.Truncate(data, 200))
 	case resp.StatusCode >= 400:
 		return nil, domain.Errorf(domain.CodeDriverError, "夸克 HTTP %d: %s", resp.StatusCode, httpx.Truncate(data, 300))
 	}
@@ -191,6 +208,11 @@ func mapBusinessError(env quarkEnvelope) error {
 	msg := strings.TrimSpace(env.Message)
 	if msg == "" {
 		msg = "未知错误"
+	}
+	// 夸克有时在 HTTP 200 的响应体里用 status=429/code=429 表达限流
+	// （"操作过于频繁"）。业务层同样要映射成 CodeRateLimited 才能触发退避重试。
+	if env.Status == http.StatusTooManyRequests || env.Code == http.StatusTooManyRequests {
+		return domain.Errorf(domain.CodeRateLimited, "夸克操作过于频繁：%s", msg)
 	}
 	switch env.Status {
 	case http.StatusUnauthorized:

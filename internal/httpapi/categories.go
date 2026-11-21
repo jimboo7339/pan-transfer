@@ -52,15 +52,15 @@ func (in *categoryIn) validate() error {
 }
 
 func (s *Server) handleCategoryList(w http.ResponseWriter, r *http.Request) error {
-	cats, err := s.deps.Store.ListCategories(r.Context())
+	cats, err := s.currentStore().ListCategories(r.Context())
 	if err != nil {
 		return err
 	}
 	for _, c := range cats {
-		if c.TaskCount, err = s.deps.Store.CountTasksInCategory(r.Context(), c.ID); err != nil {
+		if c.TaskCount, err = s.currentStore().CountTasksInCategory(r.Context(), c.ID); err != nil {
 			return err
 		}
-		if last, err := s.deps.Store.LastCallback(r.Context(), c.ID); err == nil && last != nil {
+		if last, err := s.currentStore().LastCallback(r.Context(), c.ID); err == nil && last != nil {
 			c.LastCallbackAt = last.CreatedAt.Format("2006-01-02 15:04")
 			ok := last.OK
 			c.LastCallbackOK = &ok
@@ -79,7 +79,7 @@ func (s *Server) handleCategorySave(w http.ResponseWriter, r *http.Request) erro
 		return err
 	}
 	if in.ID != 0 {
-		if _, err := s.deps.Store.GetCategory(r.Context(), in.ID); err != nil {
+		if _, err := s.currentStore().GetCategory(r.Context(), in.ID); err != nil {
 			return err
 		}
 	}
@@ -96,7 +96,7 @@ func (s *Server) handleCategorySave(w http.ResponseWriter, r *http.Request) erro
 		SkipZero:           in.SkipZero != nil && *in.SkipZero,
 		SortOrder:          in.SortOrder,
 	}
-	id, err := s.deps.Store.SaveCategory(r.Context(), cat)
+	id, err := s.currentStore().SaveCategory(r.Context(), cat)
 	if err != nil {
 		return err
 	}
@@ -109,7 +109,7 @@ func (s *Server) handleCategoryDelete(w http.ResponseWriter, r *http.Request) er
 	if err != nil {
 		return err
 	}
-	if err := s.deps.Store.DeleteCategory(r.Context(), id); err != nil {
+	if err := s.currentStore().DeleteCategory(r.Context(), id); err != nil {
 		return err
 	}
 	respond(w, map[string]bool{"ok": true})
@@ -122,7 +122,7 @@ func (s *Server) handleCategoryTest(w http.ResponseWriter, r *http.Request) erro
 	if err != nil {
 		return err
 	}
-	cat, err := s.deps.Store.GetCategory(r.Context(), id)
+	cat, err := s.currentStore().GetCategory(r.Context(), id)
 	if err != nil {
 		return err
 	}
@@ -138,7 +138,7 @@ func (s *Server) handleCategoryLogs(w http.ResponseWriter, r *http.Request) erro
 		return err
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	logs, err := s.deps.Store.ListCallbackLogs(r.Context(), id, limit)
+	logs, err := s.currentStore().ListCallbackLogs(r.Context(), id, limit)
 	if err != nil {
 		return err
 	}

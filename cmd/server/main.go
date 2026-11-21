@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -13,12 +14,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"pan-transfer/internal/accounts"
 	"pan-transfer/internal/httpapi"
 	"pan-transfer/internal/notify"
+	"pan-transfer/internal/secret"
 	"pan-transfer/internal/store"
 	"pan-transfer/internal/transfer"
 	web "pan-transfer/web"
@@ -29,6 +32,103 @@ import (
 )
 
 var version = "dev"
+
+// runtime 持有可替换的数据库与依赖它的组件。
+//
+// 还原备份时必须整体替换（换文件 → 关库 → 开库 → 重建 Manager），
+// 用一个互斥锁包住，避免出现"半个组件指向旧库"的中间态。
+//
+// stPtr 是 *runtime 上的稳定字段（不是临时变量），把它取地址交给 httpapi.Deps，
+// 于是 API 层每次请求读到的都是还原后的最新句柄，不需要重启进程。
+type runtime struct {
+	mu     sync.Mutex
+	st     *store.Store
+	stSlot **store.Store // 指向 st 字段自身，供 Deps.Store 持有
+	mgr    *accounts.Manager
+	svc    *transfer.Service
+	data   string
+}
+
+// stPtr 返回指向 st 字段的指针。
+func (rt *runtime) stPtr() **store.Store { return rt.stSlot }
+
+// setStore 在持锁状态下替换当前存储句柄（同时更新 st 与暴露给 API 的槽位）。
+func (rt *runtime) setStore(st *store.Store) {
+	rt.st = st
+	*rt.stSlot = st
+}
+
+// current 返回当前存储（还原期间为一致快照）。
+func (rt *runtime) current() (*store.Store, *accounts.Manager, *transfer.Service) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.st, rt.mgr, rt.svc
+}
+
+// restoreFrom 用备份替换数据库并重建全部依赖。
+//
+// 顺序很关键：
+//  1. 先停调度（否则 sweep 会在关库瞬间写库，导致还原后的库被污染）；
+//  2. 关闭旧连接（SQLite 不允许在打开时替换底层文件）；
+//  3. 复制快照 + 删除旧 WAL（旧事务重放到新库会造成数据错乱）；
+//  4. 重新打开并重建 Manager（丢弃全部驱动实例——它们持有还原前的凭据）。
+func (rt *runtime) restoreFrom(backupPath string) error {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+
+	dbPath := filepath.Join(rt.data, "pantransfer.db")
+
+	// 1. 停调度。Close 会 cancel 掉调度循环的 context。
+	if rt.svc != nil {
+		rt.svc.Close()
+	}
+
+	// 2. 关库。
+	if rt.st != nil {
+		_ = rt.st.Close()
+	}
+
+	// 3. 替换文件。PrepareRestore 会做 quick_check 校验。
+	plan, err := (&store.Store{}).PrepareRestore(backupPath, dbPath)
+	if err != nil {
+		rt.reopenLocked(dbPath)
+		return err
+	}
+	if err := plan.ApplyRestore(); err != nil {
+		rt.reopenLocked(dbPath)
+		return err
+	}
+
+	// 4. 重开并重建。
+	rt.reopenLocked(dbPath)
+	if rt.st == nil {
+		return fmt.Errorf("还原后无法重新打开数据库")
+	}
+	return nil
+}
+
+// reopenLocked 关闭旧句柄并重新打开 + 重建依赖。调用方必须已持锁。
+// 失败时把 rt.st 置为 nil 并返回错误，由调用方决定如何上报。
+//
+// 注意：不重建 Manager / Service，而是调用它们的 Reload。这样 Deps 里保存的
+// 指针始终有效，调度 goroutine 也不用重启（Service 内部只换 store 引用并清空
+// 进程内标记）。
+func (rt *runtime) reopenLocked(dbPath string) error {
+	st, err := store.Open(dbPath)
+	if err != nil {
+		rt.setStore(nil)
+		return fmt.Errorf("重开数据库失败: %w", err)
+	}
+	st.SetCipher(secret.Default())
+	if rt.mgr != nil {
+		rt.mgr.Reload(st)
+	}
+	if rt.svc != nil {
+		rt.svc.Reload(st)
+	}
+	rt.setStore(st)
+	return nil
+}
 
 func main() {
 	addr := flag.String("addr", ":8935", "HTTP 监听地址")
@@ -42,13 +142,38 @@ func main() {
 		log.Error("创建数据目录失败", "err", err)
 		os.Exit(1)
 	}
+
+	// 凭据加密必须在打开数据库之前完成：store 打开时即用该 cipher 解密账号。
+	// 主密钥优先取 PAN_TRANSFER_MASTER_KEY（容器场景），否则落在 data/master.key。
+	keySource, err := secret.Init(*dataDir)
+	if err != nil {
+		log.Error("初始化凭据加密失败", "err", err)
+		log.Warn("可设置 PAN_TRANSFER_ALLOW_PLAINTEXT=1 以明文模式启动（不推荐，仅用于排障）")
+		os.Exit(1)
+	}
+	plainMode := strings.EqualFold(strings.TrimSpace(os.Getenv("PAN_TRANSFER_ALLOW_PLAINTEXT")), "1")
+	if plainMode {
+		log.Warn("凭据加密已禁用（PAN_TRANSFER_ALLOW_PLAINTEXT=1）：账号 cookie/token 将以明文落库")
+	} else {
+		log.Info("凭据加密已启用", "key_source", keySource, "algo", "AES-256-GCM")
+	}
+
 	dbPath := filepath.Join(*dataDir, "pantransfer.db")
 	st, err := store.Open(dbPath)
 	if err != nil {
 		log.Error("打开数据库失败", "err", err)
 		os.Exit(1)
 	}
-	defer func() { _ = st.Close() }()
+	if plainMode {
+		st.SetCipher(nil)
+	}
+
+	// 启动即收尾：进程崩溃留下的 running 记录永远转圈，用户无法判断是否跑完。
+	if n, err := st.MarkInterruptedRuns(context.Background(), "服务重启，运行中断"); err != nil {
+		log.Warn("收尾中断的运行记录失败", "err", err)
+	} else if n > 0 {
+		log.Warn("已把上次运行中断的记录标记为失败", "count", n)
+	}
 
 	accMgr := accounts.New(st)
 	notifier := notify.New(st, log)
@@ -59,21 +184,54 @@ func main() {
 		Notify: notifier,
 	})
 	svc.Start()
-	defer svc.Close()
+
+	rt := &runtime{st: st, mgr: accMgr, svc: svc, data: *dataDir}
+	rt.stSlot = &rt.st
+
+	// 每日自动备份：data/pantransfer.db 是唯一有状态资产，容器里没有 sqlite3，
+	// 让用户"手动备份"是不现实的。保留最近 7 份。
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		// 启动后延迟 5 分钟先做一次，避免和首屏请求抢 IO。
+		time.Sleep(5 * time.Minute)
+		for {
+			cur, _, _ := rt.current()
+			if cur != nil {
+				name := store.BackupFileName(time.Now())
+				path := filepath.Join(store.BackupDir(rt.data), name)
+				if _, err := cur.BackupTo(context.Background(), path); err != nil {
+					log.Warn("自动备份失败", "err", err)
+				} else if removed, err := store.PruneBackups(store.BackupDir(rt.data), store.DefaultBackupKeep); err != nil {
+					log.Warn("清理旧备份失败", "err", err)
+				} else {
+					log.Info("自动备份完成", "name", name, "pruned", removed)
+				}
+			}
+			<-ticker.C
+		}
+	}()
 
 	srv := httpapi.NewServer(httpapi.Deps{
-		Store:    st,
-		Accounts: accMgr,
-		Transfer: svc,
-		Notify:   notifier,
-		Log:      log,
-		Version:  version,
+		Store:             rt.stSlot,
+		Accounts:          accMgr,
+		Transfer:          svc,
+		Notify:            notifier,
+		Log:               log,
+		Version:           version,
+		AllowedOrigins:    os.Getenv("PAN_TRANSFER_ALLOWED_ORIGINS"),
+		ForceSecureCookie: os.Getenv("PAN_TRANSFER_SECURE_COOKIE"),
+		DataDir:           *dataDir,
+		DBPath:            dbPath,
+		Restore:           rt.restoreFrom,
 	})
 
 	root := http.Handler(srv.Handler())
 	// 静态资源：web/dist 内嵌；SPA 路由回退 index.html
 	static, err := fs.Sub(web.DistFS, "dist")
 	if err == nil {
+		// 带 hash 的 Vite 产物可以长缓存；index.html 必须每次校验，
+		// 否则升级后用户会一直拿到旧页面（进而请求已经不存在的旧 chunk）。
 		fileServer := http.FileServer(http.FS(static))
 		root = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p := strings.TrimPrefix(r.URL.Path, "/")
@@ -82,6 +240,12 @@ func main() {
 			}
 			if _, err := fs.Stat(static, p); err != nil && !strings.HasPrefix(r.URL.Path, "/api/") {
 				r.URL.Path = "/"
+			}
+			switch {
+			case strings.HasPrefix(r.URL.Path, "/assets/"):
+				w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			case strings.HasSuffix(r.URL.Path, ".html"):
+				w.Header().Set("Cache-Control", "no-cache")
 			}
 			fileServer.ServeHTTP(w, r)
 		})
@@ -93,8 +257,14 @@ func main() {
 	}
 
 	httpSrv := &http.Server{
-		Addr:              *addr,
-		Handler:           root,
+		Addr:    *addr,
+		Handler: root,
+		// ReadHeaderTimeout 已有；补上 ReadTimeout/IdleTimeout/MaxHeaderBytes，
+		// 避免慢速连接长期占用 fd。
+		// WriteTimeout 故意留 0：异步任务改造前 POST /tasks/{id}/run 需要长时间写出。
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 		ReadHeaderTimeout: 15 * time.Second,
 	}
 

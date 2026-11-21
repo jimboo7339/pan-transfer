@@ -5,6 +5,7 @@ import Modal from './Modal.vue'
 import { taskApi, fmtTime } from '../api'
 
 const toast = inject('toast')
+const confirmDialog = inject('confirmDialog')
 
 const visible = ref(false)
 const tab = ref('runs')
@@ -14,6 +15,9 @@ const runs = ref([])
 const saved = ref([])
 const savedTotal = ref(0)
 const clearing = ref(false)
+// 展开的详细日志集合。此前 toggleLog 引用了未声明的 expandedLog，
+// 只因为没有模板调用它才没崩——留着就是定时炸弹。
+const expandedLog = ref(new Set())
 
 function open(t) {
   task.value = t
@@ -45,12 +49,24 @@ function toggleLog(id) {
   expandedLog.value = s
 }
 
+// 清空转存历史会破坏去重依据：已转存文件会被重新转存一遍。
+// 这是不可逆的数据副作用，因此用确认弹层 + 二次输入任务名。
+// 成功后给一条 Toast 撤销入口（重新把名单写回需要后端支持，
+// 目前至少提供"清空了多少条"的明确反馈，避免用户以为没生效）。
 async function clearSaved() {
-  if (!confirm(`确定清空「${task.value?.task_name}」的转存历史（共 ${savedTotal.value} 条）？\n清空后按目标目录现状重新判定，已有文件可能被重复转存。`)) return
+  const ok = await confirmDialog({
+    title: '清空转存历史',
+    body: `确定清空「${task.value?.task_name}」的转存历史（共 ${savedTotal.value} 条）？`,
+    warn: '清空后按目标目录现状重新判定，此前已转存的文件可能被重复转存。此操作不可撤销。',
+    confirmText: '确认清空',
+    variant: 'danger',
+    requireText: task.value?.task_name || '',
+  })
+  if (!ok) return
   clearing.value = true
   try {
     const r = await taskApi.clearSavedNames(task.value.id)
-    toast(`已清空 ${r?.cleared ?? 0} 条转存历史`, 'success')
+    toast(`已清空 ${r?.cleared ?? 0} 条转存历史`, 'success', 6000)
     reload()
   } catch (e) {
     toast(e.message, 'error')

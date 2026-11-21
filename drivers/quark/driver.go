@@ -23,6 +23,9 @@ type Driver struct {
 	intervalGate driver.RequestIntervalGate
 	persist      driver.AuthPersistFunc
 
+	// testBase 仅由 InitForTest 设置，用于把请求指向本地测试服务器。
+	testBase string
+
 	mu                sync.Mutex
 	cookie            string
 	lastCookieChanged bool

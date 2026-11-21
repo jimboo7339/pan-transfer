@@ -1,7 +1,8 @@
 <script setup>
-import { ref, computed, inject, watch } from 'vue'
+import { ref, computed, inject, watch, provide } from 'vue'
 import { useRoute } from 'vue-router'
 import ThemeToggle from './components/ThemeToggle.vue'
+import ConfirmDialog from './components/ConfirmDialog.vue'
 import { authApi, setToken } from './api'
 
 const session = inject('session')
@@ -12,8 +13,18 @@ const route = useRoute()
 const password = ref('')
 const busy = ref(false)
 const sidebarOpen = ref(false)
+const confirmRef = ref(null)
+const authExpired = inject('authExpired')
 
 const needLogin = computed(() => session.value.loaded && session.value.auth_required && !session.value.authed)
+
+// 把确认弹层暴露给全应用：组件里 inject('confirmDialog') 即可 await。
+// 放在 App 里而不是 main，是因为它必须跟着应用一起挂载/卸载，
+// 并且要能覆盖登录态变化（401 → 重新登录）之后的调用。
+const confirmDialog = (options) => confirmRef.value
+  ? confirmRef.value.open(options)
+  : Promise.resolve(false)
+provide('confirmDialog', confirmDialog)
 
 // 切页自动收起抽屉
 watch(() => route.path, () => { sidebarOpen.value = false })
@@ -24,7 +35,9 @@ async function doLogin() {
   try {
     const res = await authApi.login(password.value)
     if (res && res.token) setToken(res.token)
+    if (authExpired) authExpired.value = false
     await refreshSession()
+    password.value = ''
   } catch (e) {
     toast(e.message, 'error')
   } finally {
@@ -45,7 +58,12 @@ async function doLogin() {
           <div style="font-size: 12px; color: var(--text-3)">轻量网盘转存 · 夸克 / 光鸭</div>
         </div>
       </div>
-      <p style="color: var(--text-2); font-size: 13px; margin: 10px 0 18px">请输入访问密码登录管理台。</p>
+      <p v-if="authExpired" class="login-expired">
+        会话已过期或密码已变更，请重新登录。
+      </p>
+      <p v-else style="color: var(--text-2); font-size: 13px; margin: 10px 0 18px">
+        请输入访问密码登录管理台。
+      </p>
       <form @submit.prevent="doLogin">
         <input class="input" type="password" v-model="password" placeholder="访问密码" autofocus style="height: 40px" />
         <button class="btn btn-primary btn-lg" type="submit" :disabled="busy || !password" style="width: 100%; margin-top: 12px">
@@ -57,14 +75,17 @@ async function doLogin() {
   </div>
 
   <div v-else-if="session.loaded" class="layout">
+    <a class="skip-link" href="#main">跳到主内容</a>
+
     <!-- 移动端顶栏 -->
     <div class="topbar">
-      <button class="btn btn-icon btn-ghost" aria-label="打开菜单" @click="sidebarOpen = true">
+      <button class="btn btn-icon btn-ghost" aria-label="打开菜单"
+        :aria-expanded="sidebarOpen" aria-controls="sidebar" @click="sidebarOpen = true">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
       </button>
       <div class="brand-mini">
         <div class="brand-logo">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l4.5-7 3.5 5 3.5-8 4.5 10"/></svg>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l4.5-7 3.5 5 3.5-8 4.5 10"/></svg>
         </div>
         PanTransfer
       </div>
@@ -75,7 +96,7 @@ async function doLogin() {
     <!-- 抽屉遮罩 -->
     <div v-if="sidebarOpen" class="drawer-backdrop" @click="sidebarOpen = false"></div>
 
-    <aside class="sidebar" :class="{ open: sidebarOpen }">
+    <aside class="sidebar" :class="{ open: sidebarOpen }" id="sidebar">
       <div class="brand">
         <div class="brand-logo">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l4.5-7 3.5 5 3.5-8 4.5 10"/></svg>
@@ -85,7 +106,7 @@ async function doLogin() {
           <div class="brand-sub">网盘转存工具</div>
         </div>
       </div>
-      <nav class="nav">
+      <nav class="nav" aria-label="主导航">
         <router-link v-slot="{ href, navigate }" custom to="/">
           <button class="nav-item" :class="{ active: $route.path === '/' }" :href="href" @click="navigate">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l4.5-7 3.5 5 3.5-8 4.5 10"/></svg>
@@ -124,7 +145,7 @@ async function doLogin() {
       </div>
     </aside>
 
-    <main class="main">
+    <main class="main" id="main">
       <router-view />
     </main>
   </div>
@@ -134,12 +155,32 @@ async function doLogin() {
   </div>
 
   <!-- 全局 Toast -->
-  <div class="toasts">
+  <div class="toasts" role="status" aria-live="polite">
     <div v-for="t in toasts" :key="t.id" class="toast" :class="'toast-' + t.type">
       <span v-if="t.type === 'success'">✓</span>
       <span v-else-if="t.type === 'error'">✕</span>
       <span v-else>ℹ</span>
       <span class="flex-1">{{ t.msg }}</span>
+      <button v-if="t.action" class="toast-action" @click="t.action.onClick(); $event.target.remove?.()">
+        {{ t.action.label }}
+      </button>
     </div>
   </div>
+
+  <!-- 统一确认弹层（替代原生 confirm） -->
+  <ConfirmDialog ref="confirmRef" />
 </template>
+
+<style scoped>
+/* 会话过期提示：需要用户理解"为什么又要登录一次"，
+   而不是看到一个和首次登录一模一样的输入框。 */
+.login-expired {
+  margin: 10px 0 18px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 13px;
+  line-height: 1.6;
+}
+</style>

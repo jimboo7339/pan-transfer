@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"pan-transfer/internal/domain"
+	"pan-transfer/internal/secret"
 
 	_ "modernc.org/sqlite"
 )
@@ -19,6 +20,10 @@ import (
 // Store 封装 SQLite 连接与全部仓储方法。
 type Store struct {
 	db *sql.DB
+
+	// cipher 保护账号凭据（cookie / token）静态加密。
+	// 为 nil 时按明文读写，用于尚未初始化的场景与测试。
+	cipher *secret.Cipher
 }
 
 // Open 打开（必要时创建）SQLite 数据库并执行迁移。
@@ -30,7 +35,7 @@ func Open(path string) (*Store, error) {
 	}
 	// modernc/sqlite 写并发受限，串行化写入最稳。
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db}
+	s := &Store{db: db, cipher: secret.Default()}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -41,199 +46,30 @@ func Open(path string) (*Store, error) {
 // Close 关闭数据库。
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) migrate() error {
-	const schema = `
-CREATE TABLE IF NOT EXISTS accounts (
-	id          INTEGER PRIMARY KEY AUTOINCREMENT,
-	name        TEXT NOT NULL,
-	driver_type TEXT NOT NULL,
-	config      TEXT NOT NULL DEFAULT '{}',
-	is_active   INTEGER NOT NULL DEFAULT 1,
-	sort_order  INTEGER NOT NULL DEFAULT 0,
-	created_at  TEXT NOT NULL,
-	updated_at  TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS tasks (
-	id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-	task_name               TEXT NOT NULL,
-	account_id              INTEGER NOT NULL,
-	share_url               TEXT NOT NULL DEFAULT '',
-	share_links             TEXT NOT NULL DEFAULT '[]',
-	save_path               TEXT NOT NULL DEFAULT '',
-	pattern                 TEXT NOT NULL DEFAULT '',
-	replace                 TEXT NOT NULL DEFAULT '',
-	ignore_extension        INTEGER NOT NULL DEFAULT 0,
-	run_week                TEXT NOT NULL DEFAULT '',
-	run_time                TEXT NOT NULL DEFAULT '',
-	end_date                TEXT NOT NULL DEFAULT '',
-	update_subdir           TEXT NOT NULL DEFAULT '',
-	update_subdir_resave_mode TEXT NOT NULL DEFAULT '',
-	start_fid               TEXT NOT NULL DEFAULT '',
-	share_fid               TEXT NOT NULL DEFAULT '',
-	category_id             INTEGER NOT NULL DEFAULT 0,
-	sort_index              INTEGER NOT NULL DEFAULT 1,
-	skip_history            TEXT NOT NULL DEFAULT 'global',
-	status                  TEXT NOT NULL DEFAULT 'running',
-	last_run_at             TEXT NOT NULL DEFAULT '',
-	last_run_status         TEXT NOT NULL DEFAULT '',
-	last_run_message        TEXT NOT NULL DEFAULT '',
-	last_tree_summary       TEXT NOT NULL DEFAULT '',
-	created_at              TEXT NOT NULL,
-	updated_at              TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS task_runs (
-	id            INTEGER PRIMARY KEY AUTOINCREMENT,
-	task_id       INTEGER NOT NULL,
-	status        TEXT NOT NULL,
-	message       TEXT NOT NULL DEFAULT '',
-	tree_summary  TEXT NOT NULL DEFAULT '',
-	log           TEXT NOT NULL DEFAULT '',
-	transfer_count INTEGER NOT NULL DEFAULT 0,
-	link          TEXT NOT NULL DEFAULT '',
-	started_at    TEXT NOT NULL,
-	finished_at   TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_task_runs_task ON task_runs(task_id, id DESC);
-CREATE TABLE IF NOT EXISTS magic_regex_rules (
-	key     TEXT PRIMARY KEY,
-	label   TEXT NOT NULL DEFAULT '',
-	pattern TEXT NOT NULL DEFAULT '',
-	replace TEXT NOT NULL DEFAULT '',
-	enabled INTEGER NOT NULL DEFAULT 1
-);
-CREATE TABLE IF NOT EXISTS saved_names (
-	id        INTEGER PRIMARY KEY AUTOINCREMENT,
-	task_id   INTEGER NOT NULL,
-	norm_name TEXT NOT NULL,
-	file_name TEXT NOT NULL,
-	file_size INTEGER NOT NULL DEFAULT 0,
-	saved_at  TEXT NOT NULL,
-	UNIQUE(task_id, norm_name)
-);
-CREATE INDEX IF NOT EXISTS idx_saved_names_task ON saved_names(task_id);
-CREATE TABLE IF NOT EXISTS task_categories (
-	id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-	name               TEXT NOT NULL,
-	callback_enabled   INTEGER NOT NULL DEFAULT 0,
-	callback_mode      TEXT NOT NULL DEFAULT 'round',
-	callback_method    TEXT NOT NULL DEFAULT 'POST',
-	callback_url       TEXT NOT NULL DEFAULT '',
-	callback_headers   TEXT NOT NULL DEFAULT '',
-	callback_body      TEXT NOT NULL DEFAULT '',
-	callback_timeout_sec INTEGER NOT NULL DEFAULT 15,
-	skip_zero          INTEGER NOT NULL DEFAULT 0,
-	sort_order         INTEGER NOT NULL DEFAULT 0,
-	created_at         TEXT NOT NULL,
-	updated_at         TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS callback_logs (
-	id          INTEGER PRIMARY KEY AUTOINCREMENT,
-	category_id INTEGER NOT NULL,
-	kind        TEXT NOT NULL DEFAULT '',
-	target      TEXT NOT NULL DEFAULT '',
-	status_code INTEGER NOT NULL DEFAULT 0,
-	ok          INTEGER NOT NULL DEFAULT 0,
-	response    TEXT NOT NULL DEFAULT '',
-	created_at  TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_callback_logs_cat ON callback_logs(category_id, id DESC);
-CREATE TABLE IF NOT EXISTS settings (
-	key   TEXT PRIMARY KEY,
-	value TEXT NOT NULL DEFAULT ''
-);
-`
-	if _, err := s.db.Exec(schema); err != nil {
-		return err
+// SetCipher 注入凭据加密器（启动时由 main 调用；测试可传 nil 关闭加密）。
+func (s *Store) SetCipher(c *secret.Cipher) { s.cipher = c }
+
+// encryptConfig 加密账号配置 JSON；未初始化 cipher 时原样返回。
+func (s *Store) encryptConfig(raw string) (string, error) {
+	if s.cipher == nil || raw == "" {
+		return raw, nil
 	}
-	// 旧库迁移：v0.1 任务无 run_mode 列，补上（已存在则忽略）
-	if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN run_mode TEXT NOT NULL DEFAULT ''`); err != nil &&
-		!strings.Contains(err.Error(), "duplicate column") {
-		return err
-	}
-	// 旧库迁移：v0.1 任务无 run_cron 列
-	if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN run_cron TEXT NOT NULL DEFAULT ''`); err != nil &&
-		!strings.Contains(err.Error(), "duplicate column") {
-		return err
-	}
-	// 旧库迁移：任务无 share_fid 列（早期版本的 task 级“锁定文件夹”）
-	if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN share_fid TEXT NOT NULL DEFAULT ''`); err != nil &&
-		!strings.Contains(err.Error(), "duplicate column") {
-		return err
-	}
-	// 旧数据迁移：task 级 share_fid 已废弃，改为写入对应链接 URL（#/list/share/<fid>）。
-	// 仅单链接任务能确定归属；多链接无法判断，直接清空避免套用到错误链接。
-	if err := s.migrateLegacyShareFID(); err != nil {
-		return err
-	}
-	// 旧库迁移：运行记录无 log 列（详细执行日志）
-	if _, err := s.db.Exec(`ALTER TABLE task_runs ADD COLUMN log TEXT NOT NULL DEFAULT ''`); err != nil &&
-		!strings.Contains(err.Error(), "duplicate column") {
-		return err
-	}
-	// 旧库迁移：任务无 category_id 列（任务分类，用于分类回调）
-	if _, err := s.db.Exec(`ALTER TABLE tasks ADD COLUMN category_id INTEGER NOT NULL DEFAULT 0`); err != nil &&
-		!strings.Contains(err.Error(), "duplicate column") {
-		return err
-	}
-	// 旧库迁移：分类无 skip_zero 列（0 转存不回调）
-	if _, err := s.db.Exec(`ALTER TABLE task_categories ADD COLUMN skip_zero INTEGER NOT NULL DEFAULT 0`); err != nil &&
-		!strings.Contains(err.Error(), "duplicate column") {
-		return err
-	}
-	return nil
+	return s.cipher.Encrypt(raw)
 }
 
-// migrateLegacyShareFID 把旧的 task 级 share_fid 并入链接后清空；可重复执行。
-func (s *Store) migrateLegacyShareFID() error {
-	rows, err := s.db.Query(`SELECT id, share_links, share_url, share_fid FROM tasks WHERE share_fid != ''`)
+// decryptConfig 解密账号配置 JSON；未初始化 cipher 或值为历史明文时原样返回，
+// 保证「先升级程序、后处理旧库」不会让所有账号一次性失效。
+func (s *Store) decryptConfig(raw string) (string, error) {
+	if s.cipher == nil || raw == "" {
+		return raw, nil
+	}
+	out, err := s.cipher.Decrypt(raw)
 	if err != nil {
-		// 列不存在（全新库且未执行 ALTER）时忽略
-		if strings.Contains(err.Error(), "no such column") {
-			return nil
-		}
-		return err
+		return "", fmt.Errorf("账号凭据解密失败（主密钥不匹配或数据损坏）：%w", err)
 	}
-	type legacy struct {
-		id    int64
-		links string
-		url   string
-		fid   string
-	}
-	var list []legacy
-	for rows.Next() {
-		var l legacy
-		if err := rows.Scan(&l.id, &l.links, &l.url, &l.fid); err != nil {
-			rows.Close()
-			return err
-		}
-		list = append(list, l)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, l := range list {
-		var links []string
-		if strings.TrimSpace(l.links) != "" {
-			_ = json.Unmarshal([]byte(l.links), &links)
-		}
-		if len(links) == 0 && strings.TrimSpace(l.url) != "" {
-			links = []string{strings.TrimSpace(l.url)}
-		}
-		if len(links) == 1 {
-			link := withShareFIDInURL(links[0], l.fid)
-			b, _ := json.Marshal([]string{link})
-			if _, err := s.db.Exec(`UPDATE tasks SET share_links=?, share_url=?, share_fid='' WHERE id=?`, string(b), link, l.id); err != nil {
-				return err
-			}
-			continue
-		}
-		if _, err := s.db.Exec(`UPDATE tasks SET share_fid='' WHERE id=?`, l.id); err != nil {
-			return err
-		}
-	}
-	return nil
+	return out, nil
 }
+
 
 // withShareFIDInURL 把文件夹 fid 写入分享链接（CASX 约定：#/list/share/<fid>），
 // 同时去掉已有 fid/fileId 参数与旧 fragment，避免重复或冲突。
@@ -300,25 +136,48 @@ func scanAccount(row interface{ Scan(...any) error }) (*Account, error) {
 	return &a, nil
 }
 
+// scanAccountDecrypted 与 scanAccount 相同，但会把 config 从密文还原成明文 JSON。
+// 读路径必须经过这里，否则调用方拿到的是密文。
+func (s *Store) scanAccountDecrypted(row interface{ Scan(...any) error }) (*Account, error) {
+	a, err := scanAccount(row)
+	if err != nil {
+		return nil, err
+	}
+	plain, err := s.decryptConfig(a.Config)
+	if err != nil {
+		return nil, err
+	}
+	a.Config = plain
+	return a, nil
+}
+
 const accountCols = "id, name, driver_type, config, is_active, sort_order, created_at, updated_at"
 
-// CreateAccount 新建账号。
+// CreateAccount 新建账号。凭据在写库前加密。
 func (s *Store) CreateAccount(ctx context.Context, a *Account) (int64, error) {
 	now := nowStr()
+	stored, err := s.encryptConfig(a.Config)
+	if err != nil {
+		return 0, err
+	}
 	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO accounts (name, driver_type, config, is_active, sort_order, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`,
-		a.Name, a.DriverType, a.Config, boolInt(a.IsActive), a.SortOrder, now, now)
+		a.Name, a.DriverType, stored, boolInt(a.IsActive), a.SortOrder, now, now)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
 
-// UpdateAccount 更新账号（按 ID 全量更新可变字段）。
+// UpdateAccount 更新账号（按 ID 全量更新可变字段）。凭据在写库前加密。
 func (s *Store) UpdateAccount(ctx context.Context, a *Account) error {
-	_, err := s.db.ExecContext(ctx,
+	stored, err := s.encryptConfig(a.Config)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx,
 		`UPDATE accounts SET name=?, driver_type=?, config=?, is_active=?, sort_order=?, updated_at=? WHERE id=?`,
-		a.Name, a.DriverType, a.Config, boolInt(a.IsActive), a.SortOrder, nowStr(), a.ID)
+		a.Name, a.DriverType, stored, boolInt(a.IsActive), a.SortOrder, nowStr(), a.ID)
 	return err
 }
 
@@ -328,17 +187,29 @@ func (s *Store) DeleteAccount(ctx context.Context, id int64) error {
 	return err
 }
 
-// GetAccount 按 ID 取账号。
-func (s *Store) GetAccount(ctx context.Context, id int64) (*Account, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+accountCols+` FROM accounts WHERE id=?`, id)
-	a, err := scanAccount(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, domain.Errorf(domain.CodeNotFound, "账号不存在")
-	}
-	return a, err
+// CountTasksByAccount 返回引用该账号的任务数。
+// 删账号前必须检查：全仓没有真正生效的外键（foreign_keys 只是 PRAGMA），
+// 直接删除会留下悬空 account_id，任务永久报「账号不存在」。
+func (s *Store) CountTasksByAccount(ctx context.Context, accountID int64) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tasks WHERE account_id=?`, accountID).Scan(&n)
+	return n, err
 }
 
-// ListAccounts 返回全部账号（sort_order, id 升序）。
+// GetAccount 按 ID 取账号（config 已解密为明文 JSON）。
+func (s *Store) GetAccount(ctx context.Context, id int64) (*Account, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+accountCols+` FROM accounts WHERE id=?`, id)
+	a, err := s.scanAccountDecrypted(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, domain.Errorf(domain.CodeNotFound, "账号不存在")
+		}
+		return nil, err
+	}
+	return a, nil
+}
+
+// ListAccounts 返回全部账号（sort_order, id 升序；config 已解密）。
 func (s *Store) ListAccounts(ctx context.Context) ([]*Account, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+accountCols+` FROM accounts ORDER BY sort_order, id`)
 	if err != nil {
@@ -347,7 +218,7 @@ func (s *Store) ListAccounts(ctx context.Context) ([]*Account, error) {
 	defer rows.Close()
 	var out []*Account
 	for rows.Next() {
-		a, err := scanAccount(rows)
+		a, err := s.scanAccountDecrypted(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -680,6 +551,26 @@ func (s *Store) CountSavedNames(ctx context.Context, taskID int64) (int, error) 
 // ClearSavedNames 清空任务的转存历史（之后运行会按目标目录现状重新判定，可能重复转存）。
 func (s *Store) ClearSavedNames(ctx context.Context, taskID int64) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM saved_names WHERE task_id=?`, taskID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// MarkInterruptedRuns 把进程崩溃后遗留的 running 运行记录收尾。
+//
+// 为什么必须做：task_runs.status='running' 是进程内状态。进程被 kill / OOM /
+// 断电后没人把它改掉，于是「运行日志」里会永远留着一批转圈的任务，
+// 用户无法判断"到底跑没跑完"。启动时统一收尾成 failed 并写明原因。
+//
+// 必须在服务开始调度前调用（启动时 s.running 必为空，不会误伤真实运行中的任务）。
+func (s *Store) MarkInterruptedRuns(ctx context.Context, message string) (int64, error) {
+	if strings.TrimSpace(message) == "" {
+		message = "服务重启，运行中断"
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE task_runs SET status='failed', message=?, finished_at=? WHERE status='running'`,
+		message, nowStr())
 	if err != nil {
 		return 0, err
 	}

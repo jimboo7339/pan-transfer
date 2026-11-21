@@ -6,6 +6,7 @@ import QRLogin from '../components/QRLogin.vue'
 import { accountApi } from '../api'
 
 const toast = inject('toast')
+const confirmDialog = inject('confirmDialog')
 
 const accounts = ref([])
 const drivers = ref([])
@@ -16,11 +17,13 @@ const isEdit = ref(false)
 const saving = ref(false)
 const probing = ref('')
 const probeState = ref({}) // { [id]: { status: 'ok'|'fail', message, at } } 持久显示探测结果
-const form = reactive({ id: 0, name: '', driver_type: '', config: '{}' })
+const form = reactive({ id: 0, name: '', driver_type: '', config: '{}', is_active: true })
 const fieldValues = ref({}) // 动态表单值
 
 const qrRef = ref(null)
 let qrPendingValues = {}
+// 哪些字段在库里已有凭据（来自 has_secret），用于表单占位提示。
+const secretSet = ref({})
 
 const currentDriver = computed(() => drivers.value.find(d => d.name === form.driver_type))
 
@@ -43,18 +46,55 @@ function driverMeta(type) {
 
 function openAdd() {
   isEdit.value = false
-  Object.assign(form, { id: 0, name: '', driver_type: drivers.value[0]?.name || '', config: '{}' })
+  Object.assign(form, { id: 0, name: '', driver_type: drivers.value[0]?.name || '', config: '{}', is_active: true })
   fieldValues.value = defaultsFor(form.driver_type)
+  secretSet.value = {}
   showEdit.value = true
 }
 
+// 账号列表接口现在返回脱敏后的配置：凭据字段是占位符 __PT_REDACTED__，
+// 且额外给出 has_secret 指明哪些凭据真实存在。
+//
+// 前端据此把凭据输入框留空并标注「已保存，留空表示不修改」：
+// 明文凭据一旦下发到浏览器，任何 XSS / 浏览器扩展都能读走，
+// 而夸克/光鸭都是逆向接口，cookie 就是完整会话。
 function openEdit(acc) {
   isEdit.value = true
-  Object.assign(form, { id: acc.id, name: acc.name, driver_type: acc.driver_type, config: acc.config })
+  Object.assign(form, {
+    id: acc.id, name: acc.name, driver_type: acc.driver_type,
+    config: acc.config, is_active: acc.is_active !== false,
+  })
   let parsed = {}
   try { parsed = JSON.parse(acc.config || '{}') } catch { /* ignore */ }
-  fieldValues.value = { ...defaultsFor(acc.driver_type), ...parsed }
+  const cfg = { ...defaultsFor(acc.driver_type), ...parsed }
+  secretSet.value = acc.has_secret || {}
+  // 占位符要还原成空串：表单为空即代表"不修改"，
+  // 保存时空字段会被还原成占位符，服务端继续用库里的真实凭据。
+  for (const k of Object.keys(cfg)) {
+    if (cfg[k] === SECRET_PLACEHOLDER) cfg[k] = ''
+  }
+  fieldValues.value = cfg
   showEdit.value = true
+}
+
+const SECRET_PLACEHOLDER = '__PT_REDACTED__'
+
+// 保存时剔除仍然为空的凭据字段（表示"保持不变"），
+// 非空的则按用户输入提交新值。
+function buildConfigJSON() {
+  const cfg = {}
+  for (const f of currentDriver.value?.fields || []) {
+    const v = (fieldValues.value[f.name] ?? '').toString().trim()
+    if (v !== '' && v !== SECRET_PLACEHOLDER) cfg[f.name] = v
+  }
+  for (const [k, v] of Object.entries(qrPendingValues)) if (!(k in cfg) && v) cfg[k] = v
+  // 提交所有字段（含占位符）让服务端做替换：占位符 = 保留原值。
+  // 只提交非凭据字段会让"修改某个静态字段"时误删凭据。
+  for (const f of currentDriver.value?.fields || []) {
+    const v = (fieldValues.value[f.name] ?? '').toString().trim()
+    if (v === '') cfg[f.name] = SECRET_PLACEHOLDER
+  }
+  return JSON.stringify(cfg)
 }
 
 function defaultsFor(type) {
@@ -77,16 +117,10 @@ function onQRSuccess(configJson) {
 
 async function save() {
   if (!form.name.trim()) { toast('请填写账号名称', 'error'); return }
-  const cfg = {}
-  for (const f of currentDriver.value?.fields || []) {
-    const v = (fieldValues.value[f.name] ?? '').toString().trim()
-    if (v !== '') cfg[f.name] = v
-  }
-  // 合并扫码带回的字段（如 device_id/client_id）
-  for (const [k, v] of Object.entries(qrPendingValues)) if (!(k in cfg) && v) cfg[k] = v
+  const cfgJSON = buildConfigJSON()
   saving.value = true
   try {
-    const body = { name: form.name.trim(), driver_type: form.driver_type, config: JSON.stringify(cfg) }
+    const body = { name: form.name.trim(), driver_type: form.driver_type, config: cfgJSON, is_active: !!form.is_active }
     if (isEdit.value) await accountApi.update(form.id, body)
     else await accountApi.create(body)
     toast(isEdit.value ? '账号已更新' : '账号已添加', 'success')
@@ -119,7 +153,14 @@ function timeNow() {
 }
 
 async function removeAcc(acc) {
-  if (!confirm(`确定删除账号「${acc.name}」？`)) return
+  const ok = await confirmDialog({
+    title: '删除网盘账号',
+    body: `确定删除账号「${acc.name}」？`,
+    warn: '若该账号下还有转存任务，服务端会拒绝删除（否则会留下无法修复的悬空任务）。请先删除或改派这些任务。',
+    confirmText: '删除',
+    variant: 'danger',
+  })
+  if (!ok) return
   try {
     await accountApi.remove(acc.id)
     delete probeState.value[acc.id]
@@ -214,15 +255,38 @@ async function removeAcc(acc) {
             </div>
 
             <template v-for="f in currentDriver?.fields || []" :key="f.name">
-              <div class="field" v-if="f.type !== 'select' || true">
-                <div class="field-label">{{ f.label }}</div>
+              <div class="field">
+                <div class="field-label">
+                  {{ f.label }}
+                  <span v-if="isEdit && secretSet[f.name]" class="tag secret-tag" title="该凭据已加密保存，留空表示不修改">
+                    🔒 已保存
+                  </span>
+                </div>
                 <select v-if="f.type === 'select'" class="select" v-model="fieldValues[f.name]">
                   <option v-for="o in f.options" :key="o.value" :value="o.value">{{ o.label }}</option>
                 </select>
-                <input v-else-if="f.type === 'password'" class="input" type="password" v-model="fieldValues[f.name]" :placeholder="f.default || ''" />
-                <input v-else class="input" v-model="fieldValues[f.name]" :placeholder="f.default || ''" />
+                <input v-else class="input" :class="{ mono: f.type !== 'password' }"
+                  :type="f.type === 'password' ? 'password' : 'text'"
+                  v-model="fieldValues[f.name]"
+                  :placeholder="f.type === 'password' && isEdit && secretSet[f.name]
+                    ? '已保存，留空表示不修改'
+                    : (f.default || '')" />
+                <div v-if="f.type === 'password' && isEdit && secretSet[f.name]" class="field-hint">
+                  凭据加密存储，界面与接口都不会回显明文；需要更换时直接填写新值。
+                </div>
               </div>
             </template>
+
+            <div v-if="isEdit" class="field">
+              <label class="checkbox">
+                <input type="checkbox" :checked="form.is_active"
+                  @change="form.is_active = $event.target.checked" />
+                启用该账号
+              </label>
+              <div class="field-hint">
+                停用后该账号下的任务不会被调度（仍可手动运行，但会报账号不可用）。
+              </div>
+            </div>
 
             <div v-if="currentDriver?.qr_login" class="card card-pad" style="background: var(--surface-2); border-style: dashed">
               <div class="flex">

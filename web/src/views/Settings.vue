@@ -1,14 +1,15 @@
 <script setup>
-// 设置：通知渠道管理 + 全局开关 + 访问密码。
+// 设置：通知渠道管理 + 全局开关 + 访问密码 + 数据备份。
 import Modal from '../components/Modal.vue'
 import WeekPicker from '../components/WeekPicker.vue'
-import { settingsApi, notifyApi, authApi, cronApi, categoryApi, fmtTime } from '../api'
+import { settingsApi, notifyApi, authApi, cronApi, categoryApi, backupApi, fmtTime, fmtSize, setToken } from '../api'
 import { CRON_PRESETS, cronToText } from '../cron'
-import { ref, reactive, inject, onMounted, watch } from 'vue'
+import { ref, reactive, inject, onMounted, watch, computed } from 'vue'
 
 const toast = inject('toast')
 const session = inject('session')
 const refreshSession = inject('refreshSession')
+const confirmDialog = inject('confirmDialog')
 
 const loading = ref(true)
 const saving = ref(false)
@@ -20,6 +21,7 @@ const settings = reactive({
   schedule_week: '',
   schedule_cron: '',
   run_retention_days: '90',
+  request_interval_ms: 300,
   auth_enabled: false,
 })
 
@@ -138,7 +140,14 @@ async function saveCat() {
 }
 
 async function removeCat(c) {
-  if (!confirm(`删除分类「${c.name}」？其下 ${c.task_count} 个任务将变为未分类，回调配置与日志一并删除。`)) return
+  const ok = await confirmDialog({
+    title: '删除任务分类',
+    body: `删除分类「${c.name}」？`,
+    warn: `其下 ${c.task_count} 个任务将变为未分类，该分类的回调配置与回调日志会一并删除。`,
+    confirmText: '删除',
+    variant: 'danger',
+  })
+  if (!ok) return
   try {
     await categoryApi.remove(c.id)
     toast('分类已删除', 'success')
@@ -185,6 +194,7 @@ async function reload() {
     loading.value = false
   }
   loadCategories()
+  loadBackups()
 }
 onMounted(reload)
 
@@ -215,7 +225,14 @@ async function saveChannel() {
 }
 
 async function removeChannel(c) {
-  if (!confirm(`确定删除通知渠道「${c.name}」？`)) return
+  const ok = await confirmDialog({
+    title: '删除通知渠道',
+    body: `确定删除通知渠道「${c.name}」？`,
+    warn: '删除后该渠道不再接收任何转存通知。',
+    confirmText: '删除',
+    variant: 'danger',
+  })
+  if (!ok) return
   await persist({ notify_channels: settings.notify_channels.filter(x => x.id !== c.id) })
 }
 
@@ -269,11 +286,91 @@ async function savePassword() {
   refreshSession()
 }
 async function clearPassword() {
-  if (!confirm('确定关闭访问密码？任何能访问本服务的人都可以操作。')) return
+  const ok = await confirmDialog({
+    title: '关闭访问密码',
+    body: '关闭后任何能访问本服务的人都可以操作你的网盘账号。',
+    warn: '若服务暴露在局域网或公网（含反向代理），这一步等于把账号控制权开放给所有人。',
+    confirmText: '关闭密码',
+    variant: 'danger',
+  })
+  if (!ok) return
   await persist({ password: '' })
   pwdModal.value = false
   refreshSession()
 }
+
+// ---------- 登出 ----------
+// 服务端会作废此前签发的全部会话（token 是无状态的，只清 Cookie 无法让
+// 已经泄露的 token 失效）。因此登出后必须清掉本地 token 并回到登录态。
+async function doLogout() {
+  const ok = await confirmDialog({
+    title: '退出登录',
+    body: '退出后需要重新输入访问密码。',
+    warn: '此操作会同时作废此前签发的所有会话令牌（包括其他设备上的登录）。',
+    confirmText: '退出',
+  })
+  if (!ok) return
+  try {
+    await authApi.logout()
+  } catch (e) {
+    // 服务端不可达时也要本地登出：留着 token 只会反复 401。
+    toast('服务端登出失败，已本地退出：' + e.message, 'error')
+  }
+  setToken('')
+  await refreshSession()
+}
+
+// ---------- 数据备份 ----------
+const backups = ref([])
+const backupsLoading = ref(false)
+const backingUp = ref(false)
+
+async function loadBackups() {
+  backupsLoading.value = true
+  try {
+    const r = await backupApi.list()
+    backups.value = r?.backups || []
+  } catch (e) {
+    toast(e.message, 'error')
+  } finally {
+    backupsLoading.value = false
+  }
+}
+
+async function createBackup() {
+  backingUp.value = true
+  try {
+    const r = await backupApi.create()
+    toast(r?.message || '备份已完成', 'success', 5000)
+    loadBackups()
+  } catch (e) {
+    toast(e.message, 'error')
+  } finally {
+    backingUp.value = false
+  }
+}
+
+async function restoreBackup(b) {
+  const ok = await confirmDialog({
+    title: '从备份还原',
+    body: `确定用备份「${b.name}」覆盖当前数据库？`,
+    warn: '还原会丢弃还原点之后的所有任务、运行记录与转存历史，且需要重启调度。此操作不可撤销。',
+    confirmText: '确认还原',
+    variant: 'danger',
+    requireText: b.name,
+  })
+  if (!ok) return
+  try {
+    await backupApi.restore(b.name)
+    toast('已还原，正在重新加载…', 'success', 5000)
+    // 还原后服务端换掉了数据库句柄，刷新一次拿到新状态。
+    setTimeout(() => window.location.reload(), 1500)
+  } catch (e) {
+    toast(e.message, 'error', 6000)
+  }
+}
+
+const newestBackup = computed(() => backups.value[0] || null)
 </script>
 
 <template>
@@ -366,7 +463,7 @@ async function clearPassword() {
       <!-- 全局策略 -->
       <div class="card card-pad mb-16">
         <div class="card-title">转存策略</div>
-        <div class="field" style="max-width: 420px">
+        <div class="field" style="max-width: 460px">
           <div class="field-label">跳过已转存历史（默认值）</div>
           <select class="select" v-model="settings.skip_history_global" @change="persist({ skip_history_global: settings.skip_history_global })">
             <option value="on">开启：按转存历史去重（推荐）</option>
@@ -374,11 +471,22 @@ async function clearPassword() {
           </select>
           <div class="field-hint">任务里选择「跟随全局」时使用此处取值。</div>
         </div>
-        <div class="field" style="max-width: 420px; margin-bottom: 0">
+        <div class="field" style="max-width: 460px">
           <div class="field-label">运行记录保留天数</div>
           <input class="input" type="number" min="0" v-model="settings.run_retention_days"
             @change="persist({ run_retention_days: String(parseInt(settings.run_retention_days, 10) || 0) })" />
           <div class="field-hint">超期的运行记录每天自动清理（每个任务至少保留最近 50 条）；填 0 = 永久保留。转存历史（去重依据）不受影响。</div>
+        </div>
+        <div class="field" style="max-width: 460px; margin-bottom: 0">
+          <div class="field-label">账号请求间隔（毫秒）</div>
+          <input class="input" type="number" min="0" max="60000" step="50"
+            v-model.number="settings.request_interval_ms"
+            @change="persist({ request_interval_ms: Number(settings.request_interval_ms) || 0 })" />
+          <div class="field-hint">
+            同一账号的任意两次网盘请求之间至少间隔这么久，是降低账号被风控概率的第一道闸。
+            <b>默认 300</b>；填 0 表示不做间隔（不推荐）。调大会显著拉长大批量转存耗时
+            （100 个文件 × 1000ms ≈ 多等 100 秒）。
+          </div>
         </div>
       </div>
 
@@ -426,7 +534,7 @@ async function clearPassword() {
       </div>
 
       <!-- 访问控制 -->
-      <div class="card card-pad">
+      <div class="card card-pad mb-16">
         <div class="card-title">访问控制</div>
         <div class="flex">
           <div class="flex-1">
@@ -435,6 +543,64 @@ async function clearPassword() {
           </div>
           <button class="btn" @click="pwdModal = true">{{ settings.auth_enabled ? '修改密码' : '设置密码' }}</button>
           <button v-if="settings.auth_enabled" class="btn btn-danger" @click="clearPassword">关闭</button>
+        </div>
+        <div v-if="settings.auth_enabled" class="field-hint mt-16" style="margin-bottom: 12px">
+          密码以 argon2id 哈希存储；修改密码会作废此前签发的所有会话。
+        </div>
+        <div v-if="settings.auth_enabled" class="flex">
+          <button class="btn btn-sm" @click="doLogout">退出登录</button>
+          <span class="field-hint" style="margin-top: 0">
+            会同时作废所有设备上的会话令牌，用于「怀疑密码泄露」时强制下线。
+          </span>
+        </div>
+      </div>
+
+      <!-- 数据备份 -->
+      <div class="card card-pad">
+        <div class="flex mb-16">
+          <div>
+            <div class="card-title" style="margin-bottom: 2px">数据备份</div>
+            <div class="page-desc">
+              备份包含账号凭据、任务、运行记录与转存历史（<b>凭据是加密后的密文</b>，
+              但与主密钥一起才能用；<code class="mono">master.key</code> 也要一并保存）。
+              服务每天自动备份一次，保留最近 {{ backups.length ? '7' : '7' }} 份。
+            </div>
+          </div>
+          <span class="flex-1"></span>
+          <button class="btn btn-primary" :disabled="backingUp" @click="createBackup">
+            <span v-if="backingUp" class="spinner"></span>
+            <span v-else>＋ 立即备份</span>
+          </button>
+        </div>
+        <div v-if="backupsLoading" class="loading-block"><span class="spinner"></span></div>
+        <div v-else-if="!backups.length" class="empty" style="padding: 22px">
+          <div class="empty-hint">还没有备份。建议立即创建一份（首次启动后 5 分钟也会自动创建）。</div>
+        </div>
+        <div v-else class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>备份文件</th>
+                <th style="width: 100px">大小</th>
+                <th style="width: 150px">时间</th>
+                <th style="width: 200px">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="b in backups" :key="b.name">
+                <td>
+                  <code class="mono">{{ b.name }}</code>
+                  <span v-if="b.name === newestBackup?.name" class="tag" style="margin-left: 6px">最新</span>
+                </td>
+                <td class="num muted">{{ fmtSize(b.size) }}</td>
+                <td class="num muted">{{ fmtTime(b.mod_time) }}</td>
+                <td>
+                  <a class="btn btn-sm" :href="backupApi.downloadUrl(b.name)" download>下载</a>
+                  <button class="btn btn-sm btn-danger btn-ghost" @click="restoreBackup(b)">还原</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </template>

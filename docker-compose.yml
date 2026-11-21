@@ -1,12 +1,27 @@
 # PanTransfer NAS / 服务器部署
 services:
   pan-transfer:
-    image: ghcr.io/jimboo7339/pan-transfer:latest   
+    image: ghcr.io/jimboo7339/pan-transfer:latest
     container_name: pan-transfer
     restart: unless-stopped
     ports:
       - "8935:8935"          # 左边可改；右边 8935 是容器内端口不要动
     environment:
       - TZ=Asia/Shanghai     # 追剧定时按此时区调度，务必保持
+      # 凭据加密（可选，强烈推荐）：设了这个环境变量就用它作为主密钥，
+      # 否则会在 /app/data/master.key 自动生成一份（0600）。
+      # 好处：备份文件可以放别处而不担心泄露 cookie。
+      # 格式：64 位十六进制（32 字节），生成方式：
+      #   openssl rand -hex 32
+      # - PAN_TRANSFER_MASTER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      #
+      # 反向代理场景（反代终止 TLS、应用只看到 HTTP）需要下面两项：
+      # - PAN_TRANSFER_SECURE_COOKIE=1        # 无条件给会话 Cookie 加 Secure
+      # - PAN_TRANSFER_ALLOWED_ORIGINS=https://pan.example.com   # 可信的外部 Origin
+      #
+      # 排障用（不推荐）：明文存储凭据
+      # - PAN_TRANSFER_ALLOW_PLAINTEXT=1
     volumes:
-      - ./pan-transfer/data:/app/data   # SQLite 与全部状态都在这里，升级镜像不丢数据
+      # SQLite、master.key、backups/ 全在这里，升级镜像不丢数据。
+      # 备份时请连 master.key 一起保存：没有它备份里的凭据解不开。
+      - ./pan-transfer/data:/app/data

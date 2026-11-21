@@ -3,9 +3,7 @@ package httpapi
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -21,18 +19,52 @@ import (
 	"pan-transfer/internal/domain"
 	"pan-transfer/internal/driver"
 	"pan-transfer/internal/notify"
+	"pan-transfer/internal/secret"
 	"pan-transfer/internal/store"
 	"pan-transfer/internal/transfer"
 )
 
 // Deps 是 API 层依赖。
 type Deps struct {
-	Store    *store.Store
+	// Store 是数据库句柄的**地址**，而不是句柄本身。
+	//
+	// 为什么是指针的指针：从备份还原时必须换掉整个 *store.Store（换文件 →
+	// 关库 → 重开），如果 Deps 里存的是值，所有已注册的 handler 会继续用
+	// 已关闭的旧句柄。存地址后，handler 每次请求都通过 currentStore() 取
+	// 当前句柄，还原完成后无需重启即可继续服务。
+	Store **store.Store
+
 	Accounts *accounts.Manager
 	Transfer *transfer.Service
 	Notify   *notify.Sender
 	Log      *slog.Logger
 	Version  string
+
+	// AllowedOrigins 是反向代理场景下的额外可信 Origin（逗号分隔）。
+	// 为空时只接受与请求 Host 同源的 Origin。
+	AllowedOrigins string
+
+	// ForceSecureCookie 为 "1" 时无条件给会话 Cookie 加 Secure，
+	// 用于「TLS 在反代终止、应用只看到 HTTP」的部署。
+	ForceSecureCookie string
+
+	// DataDir 是 SQLite 所在目录，备份文件落在 DataDir/backups。
+	DataDir string
+
+	// DBPath 是当前数据库的完整路径（还原时替换它）。
+	DBPath string
+
+	// Restore 从备份还原数据库，由 main 装配（需要管理 Store/Manager/调度器
+	// 三者的生命周期）。为 nil 时还原接口返回「当前构建未提供还原能力」。
+	Restore func(backupPath string) error
+}
+
+// currentStore 返回当前数据库句柄；Store 未注入时返回 nil。
+func (s *Server) currentStore() *store.Store {
+	if s.deps.Store == nil {
+		return nil
+	}
+	return *s.deps.Store
 }
 
 // Server 是 HTTP API 服务。
@@ -42,11 +74,18 @@ type Server struct {
 
 	secret     string // 会话签名密钥
 	secretOnce sync.Once
+
+	// versionMu 保护 sessionVer（会话签名里混入的版本号，用于吊销全部会话）。
+	versionMu  sync.RWMutex
+	sessionVer string
+
+	// logins 对登录尝试做限流，防止短口令被暴力破解。
+	logins *loginLimiter
 }
 
 // NewServer 构造 API 服务（含路由注册）。
 func NewServer(deps Deps) *Server {
-	s := &Server{deps: deps, mux: http.NewServeMux()}
+	s := &Server{deps: deps, mux: http.NewServeMux(), logins: newLoginLimiter()}
 	s.routes()
 	return s
 }
@@ -60,6 +99,7 @@ func (s *Server) routes() {
 
 	// 认证
 	m.HandleFunc("POST /api/auth/login", s.handleLogin)
+	m.HandleFunc("POST /api/auth/logout", s.handleLogout)
 	m.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
 
 	// 驱动与账号
@@ -100,6 +140,9 @@ func (s *Server) routes() {
 	// 调度辅助
 	m.HandleFunc("GET /api/cron/next", s.wrap(s.handleCronNext))
 
+	// 备份与还原
+	s.registerBackupRoutes()
+
 	// 设置与通知
 	m.HandleFunc("GET /api/settings", s.wrap(s.handleSettingsGet))
 	m.HandleFunc("PUT /api/settings", s.wrap(s.handleSettingsPut))
@@ -107,6 +150,80 @@ func (s *Server) routes() {
 
 	// 服务信息
 	m.HandleFunc("GET /api/health", s.handleHealth)
+	m.HandleFunc("GET /api/health/ready", s.handleHealthReady)
+}
+
+// handleHealthReady 是深度健康检查。
+//
+// /api/health 只证明进程能响应（Docker HEALTHCHECK 用它），但进程活着不等于
+// 功能可用：DB 锁死、调度协程挂掉、账号全部失效都会让"健康"的容器实际不干活。
+// 这里逐项探测依赖，供反代/编排系统做就绪判断，也供用户在设置页自查。
+func (s *Server) handleHealthReady(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	checks := map[string]string{} // name -> "ok" | "error"
+	details := map[string]string{}
+	ok := true
+
+	// 1. 数据库可读写（一条最小查询就够，避免引入额外依赖）。
+	if st := s.currentStore(); st == nil {
+		checks["database"] = "error"
+		details["database"] = "存储未初始化"
+		ok = false
+	} else if _, err := st.GetSetting(ctx, "app_secret"); err != nil {
+		checks["database"] = "error"
+		details["database"] = err.Error()
+		ok = false
+	} else {
+		checks["database"] = "ok"
+	}
+
+	// 2. 调度器是否在跑（正在执行任务数 / 最近扫描时间）。
+	if s.deps.Transfer != nil {
+		stats := s.deps.Transfer.Stats(ctx)
+		checks["scheduler"] = "ok"
+		details["running_tasks"] = fmt.Sprintf("%d", len(stats.RunningTaskIDs))
+		if stats.LastSweepAt != "" {
+			details["last_sweep_at"] = stats.LastSweepAt
+		}
+		if !stats.SchedulingEnabled {
+			// 调度被用户显式关闭，不是故障，但要如实反映。
+			checks["scheduler"] = "disabled"
+		}
+	} else {
+		checks["scheduler"] = "error"
+		details["scheduler"] = "调度器未初始化"
+		ok = false
+	}
+
+	// 3. 账号是否可用（有账号全部失效时给出可操作的结论）。
+	if s.deps.Accounts != nil {
+		if list, err := s.currentStore().ListAccounts(ctx); err == nil {
+			total, active := len(list), 0
+			for _, a := range list {
+				if a.IsActive {
+					active++
+				}
+			}
+			details["accounts"] = fmt.Sprintf("%d/%d", active, total)
+			checks["accounts"] = "ok"
+			if total > 0 && active == 0 {
+				// 全部停用不算"服务故障"，但用户八成是忘了开。
+				checks["accounts"] = "warn"
+			}
+		}
+	}
+
+	status := http.StatusOK
+	if !ok {
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, map[string]any{
+		"ok":      ok,
+		"checks":  checks,
+		"details": details,
+		"version": s.deps.Version,
+		"time":    time.Now().Format(time.RFC3339),
+	})
 }
 
 // ---------- 基础设施 ----------
@@ -122,6 +239,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// writeErr 把错误映射成 HTTP 响应。
+//
+// 关键点：只有 *domain.AppError 的 Message 才是给用户看的文案。
+// 其它 error（SQL 报错、上游 URL、文件路径）必须替换为通用文案并记日志——
+// 早先的实现把 err.Error() 原文回给客户端，等于把库结构、上游接口地址和
+// 服务器目录结构一起公开了。
 func writeErr(w http.ResponseWriter, err error) {
 	var ae *domain.AppError
 	if errors.As(err, &ae) {
@@ -139,8 +262,10 @@ func writeErr(w http.ResponseWriter, err error) {
 		writeJSON(w, status, map[string]apiError{"error": {Code: ae.Code, Message: ae.Message}})
 		return
 	}
+	// 非领域错误：细节只进日志，不进响应。
 	writeJSON(w, http.StatusInternalServerError, map[string]apiError{"error": {
-		Code: domain.CodeInternal, Message: err.Error(),
+		Code:    domain.CodeInternal,
+		Message: "服务器内部错误，请查看运行日志获取详细信息",
 	}})
 }
 
@@ -187,15 +312,99 @@ func pathID(r *http.Request) (int64, error) {
 
 // ---------- 认证 ----------
 
+// secretFields 是账号配置里不得下发给浏览器的凭据字段。
+// 这些值一旦进入前端内存 / 浏览器扩展 / 前端错误日志，等于账号被接管
+// （夸克、光鸭都是逆向 Web API，cookie 就是完整会话）。
+var secretFields = map[string]bool{
+	"cookie":        true,
+	"access_token":  true,
+	"refresh_token": true,
+	"password":      true,
+}
+
+// RedactedSecret 是凭据字段在 API 响应中的占位值。
+// 前端把它原样回传即表示「不修改该凭据」，服务端会保留原值。
+const RedactedSecret = "__PT_REDACTED__"
+
+// redactAccount 返回可安全下发给浏览器的账号视图：凭据字段替换为占位符。
+//
+// 只有 secretFields 里的字段被替换；其余字段（root_folder_id、delete_mode、
+// download_mode 等）必须原样下发，否则用户在编辑账号时改不动任何配置。
+func redactAccount(a *store.Account) map[string]any {
+	cfg := map[string]string{}
+	if strings.TrimSpace(a.Config) != "" {
+		_ = json.Unmarshal([]byte(a.Config), &cfg)
+	}
+	has := map[string]bool{}
+	for k, v := range cfg {
+		if secretFields[k] {
+			if strings.TrimSpace(v) != "" {
+				has[k] = true
+			}
+			cfg[k] = RedactedSecret
+		}
+	}
+	return map[string]any{
+		"id":          a.ID,
+		"name":        a.Name,
+		"driver_type": a.DriverType,
+		"config":      marshalString(cfg),
+		"has_secret":  has,
+		"is_active":   a.IsActive,
+		"sort_order":  a.SortOrder,
+		"created_at":  a.CreatedAt,
+		"updated_at":  a.UpdatedAt,
+	}
+}
+
+// restoreSecrets 把前端回传的占位符替换回数据库中的真实凭据。
+// 未携带占位符的字段按用户的新输入处理。
+func restoreSecrets(incoming, stored string) string {
+	cfg := map[string]string{}
+	_ = json.Unmarshal([]byte(incoming), &cfg)
+	old := map[string]string{}
+	if strings.TrimSpace(stored) != "" {
+		_ = json.Unmarshal([]byte(stored), &old)
+	}
+	changed := false
+	for k, v := range cfg {
+		if v != RedactedSecret {
+			continue
+		}
+		if real, ok := old[k]; ok {
+			cfg[k] = real
+		} else {
+			delete(cfg, k)
+		}
+		changed = true
+	}
+	if !changed {
+		return incoming
+	}
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		return incoming
+	}
+	return string(out)
+}
+
+func marshalString(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
 func (s *Server) secretKey() string {
 	s.secretOnce.Do(func() {
 		ctx := context.Background()
-		v, _ := s.deps.Store.GetSetting(ctx, "app_secret")
+		v, _ := s.currentStore().GetSetting(ctx, "app_secret")
 		if v == "" {
 			buf := make([]byte, 32)
 			_, _ = rand.Read(buf)
 			v = hex.EncodeToString(buf)
-			_ = s.deps.Store.SetSetting(ctx, "app_secret", v)
+			_ = s.currentStore().SetSetting(ctx, "app_secret", v)
 		}
 		s.secret = v
 	})
@@ -203,67 +412,24 @@ func (s *Server) secretKey() string {
 }
 
 func (s *Server) authEnabled(ctx context.Context) bool {
-	v, _ := s.deps.Store.GetSetting(ctx, "auth_password")
+	v, _ := s.currentStore().GetSetting(ctx, "auth_password")
 	return strings.TrimSpace(v) != ""
 }
 
-func hashPassword(pwd string) string {
-	sum := sha256.Sum256([]byte("pan-transfer:" + pwd))
-	return hex.EncodeToString(sum[:])
-}
-
-func (s *Server) signSession(expiry int64) string {
-	msg := fmt.Sprintf("session:%d", expiry)
-	mac := hmac.New(sha256.New, []byte(s.secretKey()))
-	mac.Write([]byte(msg))
-	return fmt.Sprintf("%d.%s", expiry, hex.EncodeToString(mac.Sum(nil)))
-}
-
-func (s *Server) verifySession(token string) bool {
-	parts := strings.SplitN(token, ".", 2)
-	if len(parts) != 2 {
-		return false
-	}
-	var expiry int64
-	if _, err := fmt.Sscanf(parts[0], "%d", &expiry); err != nil {
-		return false
-	}
-	if time.Now().Unix() > expiry {
-		return false
-	}
-	return hmac.Equal([]byte(s.signSession(expiry)), []byte(token))
-}
-
-func (s *Server) checkAuth(r *http.Request) error {
-	ctx := r.Context()
-	if !s.authEnabled(ctx) {
-		return nil
-	}
-	// 登录接口自身放行（login/status/health 在 wrap 外或单独注册）
-	token := ""
-	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-		token = strings.TrimPrefix(auth, "Bearer ")
-	} else if c, err := r.Cookie("pt_session"); err == nil {
-		token = c.Value
-	} else if q := r.URL.Query().Get("token"); q != "" {
-		token = q
-	}
-	if token != "" && s.verifySession(token) {
-		return nil
-	}
-	return domain.Errorf(domain.CodeAuthExpired, "未登录或会话已过期")
-}
+// sessionCtx is declared in auth.go; signing there uses it.
 
 func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	required := s.authEnabled(ctx)
 	token := ""
-	if c, err := r.Cookie("pt_session"); err == nil {
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		token = strings.TrimPrefix(auth, "Bearer ")
+	} else if c, err := r.Cookie(cookieName); err == nil {
 		token = c.Value
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"auth_required": required,
-		"authed":        !required || (token != "" && s.verifySession(token)),
+		"authed":        !required || (token != "" && s.verifySession(ctx, token)),
 		"version":       s.deps.Version,
 	})
 }
@@ -277,21 +443,51 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	stored, _ := s.deps.Store.GetSetting(ctx, "auth_password")
+	stored, _ := s.currentStore().GetSetting(ctx, "auth_password")
 	if strings.TrimSpace(stored) == "" {
 		respond(w, map[string]string{"token": ""}) // 未启用鉴权
 		return
 	}
-	if hashPassword(in.Password) != stored {
+
+	// 暴力破解防护：NAS 上 4 位数字口令很常见，必须限流而不只是"慢一点"。
+	now := time.Now()
+	key := clientKey(r)
+	if !s.logins.allow(key, now) {
+		w.Header().Set("Retry-After", "300")
+		writeErr(w, domain.Errorf(domain.CodeRateLimited, "登录失败次数过多，请 5 分钟后再试"))
+		return
+	}
+	if !verifyPassword(stored, in.Password) {
+		s.logins.recordFailure(key, now)
 		writeErr(w, domain.Errorf(domain.CodeAuthExpired, "密码错误"))
 		return
 	}
-	expiry := time.Now().Add(30 * 24 * time.Hour).Unix()
+	s.logins.reset(key)
+
+	// 旧的无盐 SHA-256 口令在登录成功后顺带升级成 Argon2id，用户无感。
+	if secret.NeedsRehash(stored) {
+		if h := s.hashPassword(in.Password); h != "" {
+			if err := s.currentStore().SetSetting(ctx, "auth_password", h); err != nil {
+				s.deps.Log.Warn("密码哈希升级失败", "err", err)
+			}
+		}
+	}
+
+	expiry := now.Add(sessionTTL).Unix()
 	token := s.signSession(expiry)
-	http.SetCookie(w, &http.Cookie{
-		Name: "pt_session", Value: token, Path: "/", MaxAge: 30 * 24 * 3600, HttpOnly: true,
-	})
+	s.setSessionCookie(w, r, token)
 	respond(w, map[string]string{"token": token})
+}
+
+// handleLogout revokes the caller's session.
+//
+// 会话是无状态的，单纯清 Cookie 会让已签发的 token 继续有效 30 天。
+// 这里递增会话版本，作废此前签发的全部 token——单人面板可以接受，
+// 而且这是让「怀疑密码泄露」真正可执行的唯一办法。
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	s.clearSessionCookie(w)
+	s.bumpSessionVersion(r.Context())
+	respond(w, map[string]bool{"ok": true})
 }
 
 // ---------- 驱动与账号 ----------
@@ -302,11 +498,15 @@ func (s *Server) handleDrivers(w http.ResponseWriter, _ *http.Request) error {
 }
 
 func (s *Server) handleAccountList(w http.ResponseWriter, r *http.Request) error {
-	list, err := s.deps.Store.ListAccounts(r.Context())
+	list, err := s.currentStore().ListAccounts(r.Context())
 	if err != nil {
 		return err
 	}
-	respond(w, list)
+	out := make([]map[string]any, 0, len(list))
+	for _, a := range list {
+		out = append(out, redactAccount(a))
+	}
+	respond(w, out)
 	return nil
 }
 
@@ -323,16 +523,16 @@ func (s *Server) handleAccountCreate(w http.ResponseWriter, r *http.Request) err
 		return domain.Errorf(domain.CodeValidation, "账号名称与驱动类型不能为空")
 	}
 	acc := &store.Account{Name: in.Name, DriverType: in.DriverType, Config: in.Config, IsActive: true}
-	id, err := s.deps.Store.CreateAccount(r.Context(), acc)
+	id, err := s.currentStore().CreateAccount(r.Context(), acc)
 	if err != nil {
 		return err
 	}
 	// 立即构建实例验证配置；失败则回滚创建。
 	ctx := r.Context()
-	created, err := s.deps.Store.GetAccount(ctx, id)
+	created, err := s.currentStore().GetAccount(ctx, id)
 	if err == nil {
 		if berr := s.deps.Accounts.Probe(ctx, id); berr != nil {
-			_ = s.deps.Store.DeleteAccount(ctx, id)
+			_ = s.currentStore().DeleteAccount(ctx, id)
 			return domain.Errorf(domain.CodeValidation, "账号验证失败：%v", berr)
 		}
 		_ = created
@@ -355,7 +555,7 @@ func (s *Server) handleAccountUpdate(w http.ResponseWriter, r *http.Request) err
 		return err
 	}
 	ctx := r.Context()
-	acc, err := s.deps.Store.GetAccount(ctx, id)
+	acc, err := s.currentStore().GetAccount(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -363,12 +563,13 @@ func (s *Server) handleAccountUpdate(w http.ResponseWriter, r *http.Request) err
 		acc.Name = in.Name
 	}
 	if in.Config != "" {
-		acc.Config = in.Config
+		// 前端回传的凭据字段是占位符时保留数据库里的真实值（见 redactAccount）。
+		acc.Config = restoreSecrets(in.Config, acc.Config)
 	}
 	if in.IsActive != nil {
 		acc.IsActive = *in.IsActive
 	}
-	if err := s.deps.Store.UpdateAccount(ctx, acc); err != nil {
+	if err := s.currentStore().UpdateAccount(ctx, acc); err != nil {
 		return err
 	}
 	// 配置变更后重建实例
@@ -383,7 +584,17 @@ func (s *Server) handleAccountDelete(w http.ResponseWriter, r *http.Request) err
 		return err
 	}
 	ctx := r.Context()
-	if err := s.deps.Store.DeleteAccount(ctx, id); err != nil {
+	// 删除账号前检查引用：留下悬空 account_id 的任务会永久报「账号不存在」，
+	// 且前端账号下拉选不中，用户无法自行修复。
+	count, err := s.currentStore().CountTasksByAccount(ctx, id)
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		return domain.Errorf(domain.CodeValidation,
+			"该账号下还有 %d 个转存任务，请先删除这些任务或改派到其他账号", count)
+	}
+	if err := s.currentStore().DeleteAccount(ctx, id); err != nil {
 		return err
 	}
 	s.deps.Accounts.DropAccount(ctx, id)
@@ -759,7 +970,7 @@ func (s *Server) handleTaskSavedCount(w http.ResponseWriter, r *http.Request) er
 	if err != nil {
 		return err
 	}
-	n, err := s.deps.Store.CountSavedNames(r.Context(), id)
+	n, err := s.currentStore().CountSavedNames(r.Context(), id)
 	if err != nil {
 		return err
 	}
@@ -773,7 +984,7 @@ func (s *Server) handleTaskSavedClear(w http.ResponseWriter, r *http.Request) er
 	if err != nil {
 		return err
 	}
-	n, err := s.deps.Store.ClearSavedNames(r.Context(), id)
+	n, err := s.currentStore().ClearSavedNames(r.Context(), id)
 	if err != nil {
 		return err
 	}
@@ -797,7 +1008,7 @@ type ruleOut struct {
 
 func (s *Server) handleRuleList(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
-	custom, err := s.deps.Store.ListRules(ctx)
+	custom, err := s.currentStore().ListRules(ctx)
 	if err != nil {
 		return err
 	}
@@ -852,7 +1063,7 @@ func (s *Server) handleRuleSave(w http.ResponseWriter, r *http.Request) error {
 		enabled = *in.Enabled
 	}
 	rule := &domain.MagicRegexRule{Key: key, Label: in.Label, Pattern: in.Pattern, Replace: in.Replace, Enabled: enabled}
-	if err := s.deps.Store.UpsertRule(r.Context(), rule); err != nil {
+	if err := s.currentStore().UpsertRule(r.Context(), rule); err != nil {
 		return err
 	}
 	respond(w, map[string]bool{"ok": true})
@@ -864,7 +1075,7 @@ func (s *Server) handleRuleDelete(w http.ResponseWriter, r *http.Request) error 
 	if !strings.HasPrefix(key, "$") {
 		key = "$" + key
 	}
-	err := s.deps.Store.DeleteRule(r.Context(), key)
+	err := s.currentStore().DeleteRule(r.Context(), key)
 	if err != nil {
 		// 内置规则的"删除"语义 = 恢复默认（覆盖行本就不存在时视为成功）
 		if transfer.BuiltinLabel(key) != "" {
@@ -926,21 +1137,27 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) error
 	if err != nil {
 		return err
 	}
-	skip, _ := s.deps.Store.GetSetting(ctx, "skip_history_global")
+	skip, _ := s.currentStore().GetSetting(ctx, "skip_history_global")
 	if skip == "" {
 		skip = "on"
 	}
-	schedEnabled, _ := s.deps.Store.GetSetting(ctx, "schedule_enabled")
+	schedEnabled, _ := s.currentStore().GetSetting(ctx, "schedule_enabled")
 	if schedEnabled == "" {
 		schedEnabled = "on"
 	}
-	schedTime, _ := s.deps.Store.GetSetting(ctx, "schedule_time")
-	schedWeek, _ := s.deps.Store.GetSetting(ctx, "schedule_week")
-	schedCron, _ := s.deps.Store.GetSetting(ctx, "schedule_cron")
-	pwd, _ := s.deps.Store.GetSetting(ctx, "auth_password")
-	retention, _ := s.deps.Store.GetSetting(ctx, "run_retention_days")
+	schedTime, _ := s.currentStore().GetSetting(ctx, "schedule_time")
+	schedWeek, _ := s.currentStore().GetSetting(ctx, "schedule_week")
+	schedCron, _ := s.currentStore().GetSetting(ctx, "schedule_cron")
+	pwd, _ := s.currentStore().GetSetting(ctx, "auth_password")
+	retention, _ := s.currentStore().GetSetting(ctx, "run_retention_days")
 	if retention == "" {
 		retention = "90"
+	}
+	interval := accounts.DefaultRequestIntervalMS
+	if v, err := s.currentStore().GetSetting(ctx, "request_interval_ms"); err == nil && strings.TrimSpace(v) != "" {
+		if n, e := strconv.Atoi(strings.TrimSpace(v)); e == nil && n >= 0 {
+			interval = n
+		}
 	}
 	respond(w, map[string]any{
 		"notify_channels":     channels,
@@ -950,6 +1167,7 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) error
 		"schedule_week":       schedWeek,
 		"schedule_cron":       schedCron,
 		"run_retention_days":  retention,
+		"request_interval_ms": interval,
 		"auth_enabled":        strings.TrimSpace(pwd) != "",
 	})
 	return nil
@@ -964,6 +1182,7 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) error
 		ScheduleWeek      *string           `json:"schedule_week"`
 		ScheduleCron      *string           `json:"schedule_cron"`
 		RunRetentionDays  *string           `json:"run_retention_days"`
+		RequestIntervalMS *int              `json:"request_interval_ms"`
 		Password          *string           `json:"password"`
 	}
 	if err := decode(r, &in); err != nil {
@@ -980,7 +1199,7 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) error
 		if v != "on" && v != "off" {
 			return domain.Errorf(domain.CodeValidation, "skip_history_global 只能是 on/off")
 		}
-		if err := s.deps.Store.SetSetting(ctx, "skip_history_global", v); err != nil {
+		if err := s.currentStore().SetSetting(ctx, "skip_history_global", v); err != nil {
 			return err
 		}
 	}
@@ -989,7 +1208,7 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) error
 		if v != "on" && v != "off" {
 			return domain.Errorf(domain.CodeValidation, "schedule_enabled 只能是 on/off")
 		}
-		if err := s.deps.Store.SetSetting(ctx, "schedule_enabled", v); err != nil {
+		if err := s.currentStore().SetSetting(ctx, "schedule_enabled", v); err != nil {
 			return err
 		}
 	}
@@ -1000,7 +1219,7 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) error
 				return domain.Errorf(domain.CodeValidation, "运行时间格式应为 HH:MM")
 			}
 		}
-		if err := s.deps.Store.SetSetting(ctx, "schedule_time", v); err != nil {
+		if err := s.currentStore().SetSetting(ctx, "schedule_time", v); err != nil {
 			return err
 		}
 	}
@@ -1014,7 +1233,7 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) error
 				}
 			}
 		}
-		if err := s.deps.Store.SetSetting(ctx, "schedule_week", v); err != nil {
+		if err := s.currentStore().SetSetting(ctx, "schedule_week", v); err != nil {
 			return err
 		}
 	}
@@ -1025,7 +1244,7 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) error
 				return domain.Errorf(domain.CodeValidation, "cron 表达式无效：%v", err)
 			}
 		}
-		if err := s.deps.Store.SetSetting(ctx, "schedule_cron", v); err != nil {
+		if err := s.currentStore().SetSetting(ctx, "schedule_cron", v); err != nil {
 			return err
 		}
 	}
@@ -1034,7 +1253,17 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) error
 		if err != nil || v < 0 {
 			return domain.Errorf(domain.CodeValidation, "运行记录保留天数应为非负整数（0 = 永久）")
 		}
-		if err := s.deps.Store.SetSetting(ctx, "run_retention_days", strconv.Itoa(v)); err != nil {
+		if err := s.currentStore().SetSetting(ctx, "run_retention_days", strconv.Itoa(v)); err != nil {
+			return err
+		}
+	}
+	if in.RequestIntervalMS != nil {
+		v := *in.RequestIntervalMS
+		// 上限保护：间隔过大等于自锁（大目录转存会超时），过小等于放弃风控防护。
+		if v < 0 || v > 60000 {
+			return domain.Errorf(domain.CodeValidation, "请求间隔应在 0–60000 毫秒之间")
+		}
+		if err := s.currentStore().SetSetting(ctx, "request_interval_ms", strconv.Itoa(v)); err != nil {
 			return err
 		}
 	}
@@ -1042,16 +1271,22 @@ func (s *Server) handleSettingsPut(w http.ResponseWriter, r *http.Request) error
 		pwd := strings.TrimSpace(*in.Password)
 		if pwd == "" {
 			// 清空密码 = 关闭鉴权
-			if err := s.deps.Store.SetSetting(ctx, "auth_password", ""); err != nil {
+			if err := s.currentStore().SetSetting(ctx, "auth_password", ""); err != nil {
 				return err
 			}
 		} else {
 			if len(pwd) < 4 {
 				return domain.Errorf(domain.CodeValidation, "密码至少 4 位")
 			}
-			if err := s.deps.Store.SetSetting(ctx, "auth_password", hashPassword(pwd)); err != nil {
+			h := s.hashPassword(pwd)
+			if h == "" {
+				return domain.Errorf(domain.CodeInternal, "密码哈希失败，请检查系统随机源是否可用")
+			}
+			if err := s.currentStore().SetSetting(ctx, "auth_password", h); err != nil {
 				return err
 			}
+			// 改密码后作废此前签发的所有会话，否则旧 token 仍可继续使用 30 天。
+			s.bumpSessionVersion(ctx)
 		}
 	}
 	respond(w, map[string]bool{"ok": true})

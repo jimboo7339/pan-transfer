@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -92,9 +93,16 @@ type Service struct {
 	rounds   map[int64]*callbackRound // 分类 ID -> 进行中的回调轮次（内存态，重启丢失）
 	roundSeq int64                    // 轮次自增 ID
 
+	// schedMu 保护以下调度可观测字段（与 lastTrigger 同锁，避免额外加锁层级）。
+	lastSweep    time.Time // 最近一次 sweep 完成时间
+	schedEnabled bool      // 最近一次 sweep 观察到的全局调度开关状态
+
 	appCtx context.Context
 	cancel context.CancelFunc
 }
+
+// sweepInterval 是调度扫描粒度，与 Start 里的 ticker 周期一致。
+const sweepInterval = 30 * time.Second
 
 // New 构造服务。
 func New(opts Options) *Service {
@@ -118,8 +126,71 @@ func New(opts Options) *Service {
 	}
 }
 
+// Reload 在底层存储被替换后重置服务状态（用于从备份还原）。
+//
+// 还原会换掉 SQLite 文件并重开连接，Service 持有的旧 *store.Store 已关闭。
+// 这里换掉引用并清空"正在运行/已触发"的进程内标记——那些标记对应的是还原前
+// 的世界，留着会永久阻塞同名任务的调度。
+//
+// 调度 goroutine 不重启（仍读 s.appCtx），避免还原后重复起协程。
+func (s *Service) Reload(st *store.Store) {
+	s.mu.Lock()
+	s.running = map[int64]struct{}{}
+	s.mu.Unlock()
+
+	s.schedMu.Lock()
+	s.lastTrigger = map[int64]string{}
+	s.schedMu.Unlock()
+
+	s.roundMu.Lock()
+	s.rounds = map[int64]*callbackRound{}
+	s.roundMu.Unlock()
+
+	s.st = st
+	s.lastPrune = ""
+}
+
 // Close 停止调度循环。
 func (s *Service) Close() { s.cancel() }
+
+// Stats 是调度器的运行时快照，供深度健康检查使用。
+// 进程活着不等于功能可用：调度协程挂了、DB 锁死、账号全部失效都需要能被发现。
+type Stats struct {
+	// RunningTaskIDs 是当前正在执行的任务 ID。
+	RunningTaskIDs []int64 `json:"running_task_ids"`
+	// LastSweepAt 是最近一次调度扫描时间（RFC3339）；从未扫描则为空。
+	LastSweepAt string `json:"last_sweep_at,omitempty"`
+	// NextTriggerAt 是下一次预期的调度扫描时间（近似值：LastSweepAt + 30s）。
+	NextSweepAt string `json:"next_sweep_at,omitempty"`
+	// SchedulingEnabled 反映全局调度开关。
+	SchedulingEnabled bool `json:"scheduling_enabled"`
+}
+
+// Stats 返回调度器运行时快照。
+func (s *Service) Stats(ctx context.Context) Stats {
+	out := Stats{}
+
+	s.mu.Lock()
+	ids := make([]int64, 0, len(s.running))
+	for id := range s.running {
+		ids = append(ids, id)
+	}
+	s.mu.Unlock()
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	out.RunningTaskIDs = ids
+
+	s.schedMu.Lock()
+	last := s.lastSweep
+	schedEnabled := s.schedEnabled
+	s.schedMu.Unlock()
+
+	if !last.IsZero() {
+		out.LastSweepAt = last.Format(time.RFC3339)
+		out.NextSweepAt = last.Add(sweepInterval).Format(time.RFC3339)
+	}
+	out.SchedulingEnabled = schedEnabled
+	return out
+}
 
 // ---------- 链接辅助 ----------
 
@@ -244,6 +315,13 @@ func (s *Service) pruneRunsDaily() {
 func (s *Service) sweep() {
 	ctx := s.appCtx
 	enabled, _ := s.st.GetSetting(ctx, "schedule_enabled")
+
+	// 记录调度可观测状态：深度健康检查需要区分「调度器还活着」和「调度被关掉」。
+	s.schedMu.Lock()
+	s.lastSweep = time.Now()
+	s.schedEnabled = enabled != "off"
+	s.schedMu.Unlock()
+
 	if enabled == "off" {
 		return
 	}

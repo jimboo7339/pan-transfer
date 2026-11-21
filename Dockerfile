@@ -31,10 +31,14 @@ FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=build /out/pan-transfer .
+# 凭据加密主密钥：不设 PAN_TRANSFER_MASTER_KEY 时自动生成到这里（0600）。
+# 备份 /app/data 时必须连这个文件一起保存，否则备份里的凭据无法解密。
 ENV TZ=Asia/Shanghai
 VOLUME ["/app/data"]
 EXPOSE 8935
+# 深度健康检查：/api/health 只证明进程活着，/api/health/ready 还会探测
+# 数据库与调度器（DB 锁死、调度协程挂掉时这里会失败）。
 HEALTHCHECK --interval=60s --timeout=5s --start-period=15s --retries=3 \
-    CMD wget -qO- http://127.0.0.1:8935/api/health >/dev/null 2>&1 || exit 1
+    CMD wget -qO- http://127.0.0.1:8935/api/health/ready >/dev/null 2>&1 || exit 1
 ENTRYPOINT ["./pan-transfer"]
 CMD ["-addr", ":8935", "-data", "/app/data"]

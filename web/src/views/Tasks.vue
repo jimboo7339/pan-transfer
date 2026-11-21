@@ -7,6 +7,7 @@ import { taskApi, accountApi, categoryApi, fmtTime } from '../api'
 import { cronToText } from '../cron'
 
 const toast = inject('toast')
+const confirmDialog = inject('confirmDialog')
 
 const tasks = ref([])
 const accounts = ref([])
@@ -108,8 +109,18 @@ async function toggleStatus(t) {
   }
 }
 
+// 删除任务：破坏性且不可逆（运行与转存历史一并删除），
+// 因此用统一确认弹层 + 二次输入任务名，避免误触。
 async function removeTask(t) {
-  if (!confirm(`确定删除任务「${t.task_name}」？运行与转存历史将一并删除。`)) return
+  const ok = await confirmDialog({
+    title: '删除转存任务',
+    body: `确定删除任务「${t.task_name}」？`,
+    warn: '该任务的运行记录与转存历史将一并删除，此操作不可撤销。',
+    confirmText: '删除',
+    variant: 'danger',
+    requireText: t.task_name,
+  })
+  if (!ok) return
   try {
     await taskApi.remove(t.id)
     toast('任务已删除', 'success')

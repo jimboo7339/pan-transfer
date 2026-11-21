@@ -5,13 +5,20 @@ package accounts
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"pan-transfer/internal/driver"
 	"pan-transfer/internal/domain"
 	"pan-transfer/internal/store"
 )
+
+// DefaultRequestIntervalMS 是账号级 API 请求的最小间隔（毫秒）。
+// 与 CASX / quark-auto-save 的保守默认一致：逐文件遍历是触发平台风控的主因，
+// 请求之间留出间隔能显著降低概率。可在「设置 → 转存策略」中调整。
+const DefaultRequestIntervalMS = 300
 
 // Manager 持有账号驱动实例缓存。
 type Manager struct {
@@ -20,13 +27,39 @@ type Manager struct {
 	mu        sync.Mutex
 	instances map[int64]driver.Driver
 
+	// delays 是账号级请求间隔门（令牌桶）。驱动在发起平台 API 前调用 Wait，
+	// 同一 accountID 的任意两个请求都不会短于设定间隔。
+	delays *driver.DelayController
+
+	// refreshMu 保护 refreshes；refreshes 提供 per-account 的刷新单飞与冷却。
+	refreshMu sync.Mutex
+	refreshes map[int64]*refreshEntry
+
 	qrMu      sync.Mutex
 	qrDrivers map[string]driver.Driver // 扫码登录的临时实例：token -> driver
 }
 
 // New 构造 Manager。
 func New(st *store.Store) *Manager {
-	return &Manager{st: st, instances: map[int64]driver.Driver{}, qrDrivers: map[string]driver.Driver{}}
+	return &Manager{
+		st:        st,
+		instances: map[int64]driver.Driver{},
+		delays:    driver.NewDelayController(),
+		refreshes: map[int64]*refreshEntry{},
+		qrDrivers: map[string]driver.Driver{},
+	}
+}
+
+// RequestInterval 返回当前配置的账号级请求间隔。
+// 设置项 request_interval_ms 为空或非法时回落到 DefaultRequestIntervalMS。
+func (m *Manager) RequestInterval(ctx context.Context) time.Duration {
+	ms := DefaultRequestIntervalMS
+	if v, err := m.st.GetSetting(ctx, "request_interval_ms"); err == nil {
+		if n, e := strconv.Atoi(strings.TrimSpace(v)); e == nil && n >= 0 {
+			ms = n
+		}
+	}
+	return time.Duration(ms) * time.Millisecond
 }
 
 // Executor 让 Manager 可直接作为 transfer.Service 的 Executor 使用。
@@ -77,6 +110,16 @@ func (m *Manager) build(ctx context.Context, acc *store.Account) (driver.Driver,
 		_ = drv.Drop(ctx)
 		return nil, err
 	}
+	// 注入账号级请求间隔门：同一账号的所有平台请求串行且保持最小间隔，
+	// 这是降低平台风控概率的第一道闸（逐文件遍历是风控主因）。
+	if rc, ok := drv.(driver.RequestIntervalConsumer); ok {
+		rc.SetRequestIntervalGate(m.delays.Gate(acc.ID))
+	}
+	// 注入认证刷新守卫：并发 401 只会触发一次真实刷新，其余等待复用结果。
+	// 光鸭 refresh_token 是轮换的，缺少单飞会让旧响应覆盖新 token 导致账号莫名失效。
+	if ac, ok := drv.(driver.AuthRefreshConsumer); ok {
+		ac.SetAuthRefreshGuard(m.refreshGuard(acc.ID))
+	}
 	// 运行期 token/cookie 变化回写账号配置。
 	if pc, ok := drv.(driver.AuthPersistConsumer); ok {
 		pc.SetAuthPersister(func(ctx context.Context, creds domain.AuthCredentials) error {
@@ -90,12 +133,35 @@ func (m *Manager) build(ctx context.Context, acc *store.Account) (driver.Driver,
 	return drv, nil
 }
 
+// Reload 在底层存储被替换后重置账号侧状态（用于从备份还原）。
+//
+// 还原会换掉 SQLite 文件并重开连接，旧 *store.Store 指向已关闭的库。
+// 这里换掉引用并清空所有缓存的驱动实例——它们持有旧的账号快照与凭据，
+// 留着会让任务继续用还原前的凭据打网盘，行为完全不可预期。
+func (m *Manager) Reload(st *store.Store) {
+	m.mu.Lock()
+	old := m.instances
+	m.instances = map[int64]driver.Driver{}
+	m.st = st
+	m.mu.Unlock()
+
+	ctx := context.Background()
+	for id, drv := range old {
+		m.delays.DropAccount(id)
+		m.dropRefreshState(id)
+		_ = drv.Drop(ctx)
+	}
+}
+
 // DropAccount 释放账号缓存实例（更新配置/删除账号后调用）。
 func (m *Manager) DropAccount(ctx context.Context, accountID int64) {
 	m.mu.Lock()
 	drv, ok := m.instances[accountID]
 	delete(m.instances, accountID)
 	m.mu.Unlock()
+	// 同步清理间隔门与刷新守卫的按账号状态，避免 map 无界增长。
+	m.delays.DropAccount(accountID)
+	m.dropRefreshState(accountID)
 	if ok {
 		_ = drv.Drop(ctx)
 	}

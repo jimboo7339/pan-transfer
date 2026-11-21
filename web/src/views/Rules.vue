@@ -5,6 +5,7 @@ import Modal from '../components/Modal.vue'
 import { ruleApi } from '../api'
 
 const toast = inject('toast')
+const confirmDialog = inject('confirmDialog')
 
 const rules = ref([])
 const loading = ref(true)
@@ -65,7 +66,13 @@ async function toggleEnabled(r) {
 }
 
 async function resetRule(r) {
-  if (!confirm(`恢复「${r.label || r.key}」为内置默认？自定义修改将被清除。`)) return
+  const ok = await confirmDialog({
+    title: '恢复内置规则',
+    body: `恢复「${r.label || r.key}」为内置默认？`,
+    warn: '你对这条内置规则的修改将被清除。',
+    confirmText: '恢复',
+  })
+  if (!ok) return
   try {
     await ruleApi.remove(r.key)
     toast('已恢复默认', 'success')
@@ -76,7 +83,14 @@ async function resetRule(r) {
 }
 
 async function removeRule(r) {
-  if (!confirm(`确定删除规则「${r.label || r.key}」？`)) return
+  const ok = await confirmDialog({
+    title: '删除命名规则',
+    body: `确定删除规则「${r.label || r.key}」？`,
+    warn: '引用该规则的任务将回退为字面正则匹配，可能不再正确重命名。',
+    confirmText: '删除',
+    variant: 'danger',
+  })
+  if (!ok) return
   try {
     await ruleApi.remove(r.key)
     toast('规则已删除', 'success')
