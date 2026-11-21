@@ -1,6 +1,7 @@
 <script setup>
 // 设置：通知渠道管理 + 全局开关 + 访问密码 + 数据备份。
 import Modal from '../components/Modal.vue'
+import ErrorState from '../components/ErrorState.vue'
 import WeekPicker from '../components/WeekPicker.vue'
 import ConfigTransfer from '../components/ConfigTransfer.vue'
 import { settingsApi, notifyApi, authApi, cronApi, categoryApi, backupApi, fmtTime, fmtSize, setToken } from '../api'
@@ -28,12 +29,30 @@ const settings = reactive({
 
 const globalCronNext = ref('')
 const globalCronError = ref('')
+
+// 全局 cron 校验：防抖 300ms + 请求序号守卫。
+//
+// 与 TaskEdit 的 cron 校验同一套理由：
+//   - 无防抖时每敲一个字符发一次请求，`0 */2 * * *` 会发 11 个，
+//     在 SQLite 单连接下排队拖慢其它 API；
+//   - 无序号守卫时先发的请求后返回会覆盖新结果，
+//     用户看到的"下次执行时间"是上一次输入算出来的。
+let globalCronTimer = null
+let globalCronSeq = 0
+
 watch(() => settings.schedule_cron, (v) => {
   globalCronNext.value = ''; globalCronError.value = ''
+  if (globalCronTimer) { clearTimeout(globalCronTimer); globalCronTimer = null }
   if (!v || !v.trim()) return
   const expr = v.trim()
   if (expr.split(/\s+/).length !== 5) { globalCronError.value = '需要 5 个字段：分 时 日 月 周'; return }
-  cronApi.next(expr).then(r => { globalCronNext.value = r.next_run }).catch(e => { globalCronError.value = e.message })
+
+  const seq = ++globalCronSeq
+  globalCronTimer = setTimeout(() => {
+    cronApi.next(expr)
+      .then(r => { if (seq === globalCronSeq) globalCronNext.value = r.next_run })
+      .catch(e => { if (seq === globalCronSeq) globalCronError.value = e.message })
+  }, 300)
 })
 
 const channelTypes = [
@@ -184,16 +203,25 @@ async function openCatLogs(c) {
   }
 }
 
+// reload 加载全局设置。
+//
+// 加载失败必须能与「设置都是默认值」区分开：
+// 早先失败只 toast，然后 settings 保持初始默认值渲染出完整表单，
+// 用户会以为"我的配置就是这样"，点保存就把默认值写回库、覆盖真实配置。
+const loadError = ref(null)
+
 async function reload() {
   loading.value = true
+  loadError.value = null
   try {
     const s = await settingsApi.get()
     Object.assign(settings, s)
   } catch (e) {
-    toast(e.message, 'error')
+    loadError.value = e
   } finally {
     loading.value = false
   }
+  // 分类与备份是次要信息，失败不阻塞主表单
   loadCategories()
   loadBackups()
 }
@@ -398,6 +426,12 @@ const newestBackup = computed(() => backups.value[0] || null)
     </div>
 
     <div v-if="loading" class="loading-block"><span class="spinner"></span> 加载中…</div>
+
+    <!-- 加载失败：必须阻止用户在这个状态下点保存。
+         否则表单显示的是初始默认值，保存会把真实配置覆盖掉。 -->
+    <ErrorState v-else-if="loadError" :error="loadError" :on-retry="reload"
+      hint="设置加载失败，为避免用默认值覆盖你的真实配置，已禁用保存。请确认服务正在运行后重试。" />
+
     <template v-else>
       <!-- 通知 -->
       <div class="card card-pad mb-16">
@@ -440,11 +474,15 @@ const newestBackup = computed(() => backups.value[0] || null)
           <div class="flex">
             <label class="switch">
               <input type="checkbox" :checked="settings.schedule_enabled !== 'off'"
-                @change="settings.schedule_enabled = $event.target.checked ? 'on' : 'off'; saveSchedule()" />
+                @change="settings.schedule_enabled = $event.target.checked ? 'on' : 'off'" />
               <span class="track"></span>
             </label>
             <span class="page-desc" style="margin: 0">{{ settings.schedule_enabled === 'off' ? '已关闭：所有任务仅手动运行' : '开启中：到点自动运行「跟随全局」的任务' }}</span>
           </div>
+          <!-- 开关不再立即落库：早先开关一改就保存，而下面的 cron 要按
+               「保存调度配置」才落库。用户关掉开关再打开，会发现 cron
+               还是旧值（从未保存过），以为配置丢了。
+               现在整张卡片统一走底部那一个保存按钮。 -->
         </div>
         <div class="field" style="max-width: 560px">
           <div class="field-label">Cron 表达式（分 时 日 月 周）</div>
