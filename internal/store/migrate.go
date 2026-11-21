@@ -113,14 +113,67 @@ func (s *Store) migrate() error {
 	return nil
 }
 
+// tableExists 判断表是否存在（用 sqlite_master 查，不解析错误文案）。
+func tableExists(q interface {
+	Query(string, ...any) (*sql.Rows, error)
+}, table string) (bool, error) {
+	rows, err := q.Query(`SELECT 1 FROM sqlite_master WHERE type='table' AND name=?`, table)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	return rows.Next(), rows.Err()
+}
+
+// columnExistsQuery 是 columnExists 的查询接口抽象，
+// 让 *sql.Tx 与 *sql.DB 都能用（迁移里有两种调用场景）。
+type columnExistsQuery interface {
+	Query(string, ...any) (*sql.Rows, error)
+}
+
+// hasColumn 判断表是否已有某列，不依赖错误文案。
+//
+// 早先 columnExists 用 strings.Contains(err.Error(), "no such table") 判断
+// "表不存在"，这是驱动实现细节：modernc 换成 mattn 或升个小版本，
+// 措辞一变，这里就会 return err 让整个迁移失败、进程 os.Exit(1)。
+// 现在改成先查 sqlite_master。
+func hasColumn(q columnExistsQuery, table, column string) (bool, error) {
+	exists, err := tableExists(q, table)
+	if err != nil || !exists {
+		return false, err
+	}
+	rows, err := q.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
 // migrateLegacyShareFID 把旧的 task 级 share_fid 并入链接后清空；可重复执行。
 func (s *Store) migrateLegacyShareFID() error {
+	// 先确认列存在，避免依赖"no such column"错误文案。
+	has, err := hasColumn(s.db, "tasks", "share_fid")
+	if err != nil {
+		return err
+	}
+	if !has {
+		return nil
+	}
 	rows, err := s.db.Query(`SELECT id, share_links, share_url, share_fid FROM tasks WHERE share_fid != ''`)
 	if err != nil {
-		// 列还不存在时无需回填（全新库基线已含该列）。
-		if strings.Contains(err.Error(), "no such column") {
-			return nil
-		}
 		return err
 	}
 	type legacy struct {
@@ -223,7 +276,15 @@ func columnExists(tx *sql.Tx, table, column string) (bool, error) {
 	rows, err := tx.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
 	if err != nil {
 		// 表还不存在（全新库首次迁移），视为没有该列，交给基线建表处理。
-		if strings.Contains(err.Error(), "no such table") {
+		//
+		// 用 sqlite_master 判断表是否存在，而不是匹配错误文案：
+		// "no such table" 是驱动实现细节，modernc 换成 mattn 或升个小版本
+		// 措辞一变，这里就会 return err 让整个迁移失败、进程 os.Exit(1)。
+		exists, existsErr := tableExists(tx, table)
+		if existsErr != nil {
+			return false, err
+		}
+		if !exists {
 			return false, nil
 		}
 		return false, err
@@ -348,57 +409,6 @@ CREATE TABLE IF NOT EXISTS settings (
 );`
 	_, err := tx.Exec(schema)
 	return err
-}
-
-// migrateLegacyShareFIDTx 把旧的 task 级 share_fid 并入链接后清空。
-// 单链接任务能确定归属；多链接无法判断归属哪一条，直接清空，避免套用到错误链接。
-func migrateLegacyShareFIDTx(tx *sql.Tx) error {
-	rows, err := tx.Query(`SELECT id, share_links, share_url, share_fid FROM tasks WHERE share_fid != ''`)
-	if err != nil {
-		// 老库可能还没有该列；由 addColumn 迁移负责，这里静默跳过。
-		if strings.Contains(err.Error(), "no such column") {
-			return nil
-		}
-		return err
-	}
-	type legacy struct {
-		id    int64
-		links string
-		url   string
-		fid   string
-	}
-	var list []legacy
-	for rows.Next() {
-		var l legacy
-		if err := rows.Scan(&l.id, &l.links, &l.url, &l.fid); err != nil {
-			rows.Close()
-			return err
-		}
-		list = append(list, l)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, l := range list {
-		links := parseLinksJSON(l.links)
-		if len(links) == 0 && strings.TrimSpace(l.url) != "" {
-			links = []string{strings.TrimSpace(l.url)}
-		}
-		if len(links) == 1 {
-			link := withShareFIDInURL(links[0], l.fid)
-			b, _ := json.Marshal([]string{link})
-			if _, err := tx.Exec(`UPDATE tasks SET share_links=?, share_url=?, share_fid='' WHERE id=?`,
-				string(b), link, l.id); err != nil {
-				return err
-			}
-			continue
-		}
-		if _, err := tx.Exec(`UPDATE tasks SET share_fid='' WHERE id=?`, l.id); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // migrateAuthHardening 把旧的无盐 SHA-256 口令哈希迁移掉。
