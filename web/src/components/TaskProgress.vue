@@ -9,7 +9,7 @@
 //   - 1s 轮询 job 句柄，展示阶段 + 百分比进度条 + 滚动日志；
 //   - 跑完后把最终结果回调给父组件（刷新任务列表），并自动停止轮询；
 //   - 失败/取消都能关闭并保留"查看记录"的入口。
-import { ref, computed, watch, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { jobApi, fmtTime } from '../api'
 
 const props = defineProps({
@@ -27,10 +27,19 @@ const progress = computed(() => {
   if (!job.value) return 0
   return Math.max(0, Math.min(100, job.value.progress ?? 0))
 })
+// elapsed 每秒钟重算。
+//
+// 为什么不用 computed 直接读 Date.now()：computed 的依赖收集只认响应式数据，
+// Date.now() 不是响应式的，所以 computed 只在 job 变化时才重算——
+// 结果是"已用 X 秒"在任务运行中一直不变，看起来像卡住了。
+// 这里用一个每秒 tick 的 ref 驱动重算。
+const now = ref(Date.now())
+let tickTimer = null
+
 const elapsed = computed(() => {
   if (!job.value?.started_at) return ''
   const start = new Date(job.value.started_at).getTime()
-  const end = job.value.finished_at ? new Date(job.value.finished_at).getTime() : Date.now()
+  const end = job.value.finished_at ? new Date(job.value.finished_at).getTime() : now.value
   const sec = Math.max(0, Math.round((end - start) / 1000))
   const m = Math.floor(sec / 60)
   const s = sec % 60
@@ -48,8 +57,13 @@ const statusBadge = computed(() => {
 
 async function poll() {
   if (!props.jobId) return
+  // 快照当前 jobId：await 期间 props.jobId 可能已变（watch 会 stop 并清空 job），
+// 旧响应回来会写入 job 并 schedule 下一轮，导致显示的是上一个 job 的数据、
+// cancel() 也会取消错对象。
+  const id = props.jobId
   try {
-    const j = await jobApi.get(props.jobId)
+    const j = await jobApi.get(id)
+    if (id !== props.jobId) return
     job.value = j
     error.value = ''
     if (j.status === 'running') {
@@ -60,6 +74,7 @@ async function poll() {
       emit('finished', j)
     }
   } catch (e) {
+    if (id !== props.jobId) return
     // 句柄是内存态，重启即清空；这类错误不可重试，直接停止轮询。
     error.value = e.message || '无法获取运行状态'
     stop()
@@ -100,7 +115,14 @@ watch(() => props.jobId, (v) => {
   if (v) poll()
 }, { immediate: true })
 
-onUnmounted(stop)
+// 每秒 tick 一次驱动 elapsed 重算；卸载时清理。
+onMounted(() => {
+  tickTimer = setInterval(() => { now.value = Date.now() }, 1000)
+})
+onUnmounted(() => {
+  stop()
+  if (tickTimer) { clearInterval(tickTimer); tickTimer = null }
+})
 </script>
 
 <template>
@@ -121,7 +143,7 @@ onUnmounted(stop)
 
     <template v-else-if="job">
       <div class="progress-track">
-        <div class="progress-bar" :class="{ indeterminate: !isRunning || progress === 0 }"
+        <div class="progress-bar" :class="{ indeterminate: isRunning && progress === 0 }"
           :style="{ width: (isRunning ? Math.max(progress, 3) : 100) + '%' }"></div>
       </div>
       <div class="flex" style="justify-content: space-between; margin-top: 6px">

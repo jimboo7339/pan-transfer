@@ -100,17 +100,36 @@ const globalHint = computed(() => {
   return `全局调度：${cronToText(cron)}（原始表达式 ${cron}，在「设置 → 调度配置」中修改）`
 })
 
-// cron 输入变化 → 计算下次执行
+// cron 输入变化 → 计算下次执行。
+//
+// 两个必须的防护（缺了就是竞态）：
+//   1. 防抖 300ms：每敲一个字符发一次请求，输入 `0 */2 * * *` 会发 11 个请求，
+//      而且 SQLite 单连接下这些请求会排队，把正常 API 调用拖慢。
+//   2. 请求序号：先发的请求可能后返回，把 cronNext/cronError 写成过期结果。
+//      用户快速改完 `0 */2 * * *` 再改成 `0 8 * * *`，
+//      旧响应回来会覆盖新结果，界面显示的还是上一次算出的下次执行时间。
+//      关闭弹层后旧响应还会写到新表单的 cron 上。
 const cronNext = ref('')
 const cronError = ref('')
+let cronTimer = null
+let cronSeq = 0
+
 watch(() => form.run_cron, (v) => {
   cronNext.value = ''; cronError.value = ''
+  if (cronTimer) { clearTimeout(cronTimer); cronTimer = null }
   if (!v || !v.trim()) return
+
   const expr = v.trim()
   // 简单校验 5 字段
   const parts = expr.split(/\s+/)
   if (parts.length !== 5) { cronError.value = '需要 5 个字段：分 时 日 月 周'; return }
-  cronApi.next(expr).then(r => { cronNext.value = r.next_run }).catch(e => { cronError.value = e.message })
+
+  const seq = ++cronSeq
+  cronTimer = setTimeout(() => {
+    cronApi.next(expr)
+      .then(r => { if (seq === cronSeq) cronNext.value = r.next_run })
+      .catch(e => { if (seq === cronSeq) cronError.value = e.message })
+  }, 300)
 }, { immediate: false })
 
 const selectedAccount = computed(() => accounts.value.find(a => a.id === form.account_id))

@@ -93,11 +93,22 @@ function open(p) {
 }
 defineExpose({ open })
 
+// load 加载指定目录的分享内容。
+//
+// 竞态防护：open / enterDir / jumpTo / 面包屑点击都会调它，
+// 快速连点两个目录时响应顺序不保证。早先没有序号守卫，
+// 结果是 items 来自 A 目录、trail/curDirName 来自 B 目录，
+// 面包屑与列表内容不匹配，用户以为点进了"错误"的目录。
+let loadSeq = 0
+
 async function load(fid) {
+  const seq = ++loadSeq
   loading.value = true
   loadError.value = ''
   try {
     const res = await shareApi.preview({ ...params, pdir_fid: fid, max_items: 2000 })
+    // 过期响应直接丢弃，不写任何状态
+    if (seq !== loadSeq) return
     items.value = res.items || []
     pwdID.value = res.pwd_id
     pdirFID.value = res.pdir_fid
@@ -105,11 +116,14 @@ async function load(fid) {
     truncated.value = res.truncated
     page.value = 1
   } catch (e) {
+    if (seq !== loadSeq) return
     toast(e.message, 'error')
     loadError.value = e.message
     items.value = []
   } finally {
-    loading.value = false
+    // 只有最新那次请求才能解除 loading，
+    // 否则旧请求先返回会把加载态提前关掉。
+    if (seq === loadSeq) loading.value = false
   }
 }
 
