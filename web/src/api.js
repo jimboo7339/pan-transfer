@@ -1,4 +1,8 @@
-// 轻量 API 客户端：JSON、错误冒泡、Bearer 会话。
+// 轻量 API 客户端：JSON、错误冒泡、Bearer 会话、错误分类。
+//
+// 错误分类（kind）让 UI 能决定「重试 / 重新登录 / 就地提示」，而不是一律
+// 弹一个 toast。此前所有错误都是同一个 toast，401 时用户看到"HTTP 401"
+// 并不知道要重新输入密码；网络抖动一次就白屏。
 let token = localStorage.getItem('pt_token') || ''
 let onUnauthorized = null
 
@@ -10,6 +14,24 @@ export function setToken(t) {
 export function getToken() { return token }
 export function setUnauthorizedHandler(fn) { onUnauthorized = fn }
 
+// 错误类型：
+//   network     网络不可达 / 请求没发出去 —— 可重试
+//   auth        401，会话过期或密码变更 —— 需要重新登录，重试无意义
+//   validation  400，请求参数错误 —— 需要用户改输入，重试无意义
+//   request     其它 4xx（404/409 等）—— 需要用户处理，重试无意义
+//   server      5xx，服务端异常 —— 可重试（可能是暂时的）
+export const ERR = {
+  NETWORK: 'network',
+  AUTH: 'auth',
+  VALIDATION: 'validation',
+  REQUEST: 'request',
+  SERVER: 'server',
+}
+
+// 可重试的错误类型。UI 据此决定要不要显示"重试"按钮。
+export const RETRYABLE = new Set([ERR.NETWORK, ERR.SERVER])
+
+// request 执行一次请求，失败时抛出带 kind 的 Error。
 async function request(method, url, body) {
   const headers = { 'Content-Type': 'application/json' }
   if (token) headers['Authorization'] = 'Bearer ' + token
@@ -18,29 +40,59 @@ async function request(method, url, body) {
   let resp, data
   try {
     resp = await fetch(url, opts)
+  } catch (e) {
+    // fetch 只在「请求根本没发出去」时抛（断网、DNS 失败、CORS 被拦）。
+    // 这种情况下重试有意义。
+    const err = new Error('网络请求失败：' + e.message)
+    err.kind = ERR.NETWORK
+    throw err
+  }
+  // 响应体解析失败通常意味着反代返回了 HTML 错误页，
+  // 而不是我们的 JSON——这种情况重试无意义，但要给用户可理解的提示。
+  try {
     data = await resp.json()
   } catch (e) {
-    // 区分「网络断了」和「服务器返回了非 JSON（通常是反代错误页）」：
-    // 前者值得自动重试一次，后者重试无意义且会掩盖真实问题。
-    const err = new Error('网络请求失败：' + e.message)
-    err.kind = 'network'
-    throw err
+    if (!resp.ok) {
+      const err = new Error(`服务返回了非 JSON 响应（HTTP ${resp.status}）`)
+      err.kind = resp.status >= 500 ? ERR.SERVER : ERR.REQUEST
+      err.status = resp.status
+      throw err
+    }
+    return null
   }
   if (!resp.ok) {
     const msg = data && data.error ? data.error.message : `HTTP ${resp.status}`
     if (resp.status === 401 && onUnauthorized) onUnauthorized()
     const err = new Error(msg)
     err.code = data && data.error ? data.error.code : ''
-    // 错误分类让 UI 能决定「重试 / 重新登录 / 就地提示」，
-    // 而不是一律弹一个 toast（401 时用户看到"HTTP 401"并不知道要重登）。
-    if (resp.status === 401) err.kind = 'auth'
-    else if (resp.status === 400) err.kind = 'validation'
-    else if (resp.status >= 500) err.kind = 'server'
-    else err.kind = 'request'
+    if (resp.status === 401) err.kind = ERR.AUTH
+    else if (resp.status === 400) err.kind = ERR.VALIDATION
+    else if (resp.status >= 500) err.kind = ERR.SERVER
+    else err.kind = ERR.REQUEST
     err.status = resp.status
     throw err
   }
   return data && 'data' in data ? data.data : data
+}
+
+// withRetry 对可重试的错误做一次指数退避重试。
+//
+// 只重试一次而不是三次：用户手动触发的操作（保存、删除）重试三次会显得
+// "点了没反应"；而 GET 请求在后台被定时任务大量调用，重试成本要克制。
+// 调用方也可以自己决定是否重试。
+export async function withRetry(fn, { retries = 1, baseDelay = 400 } = {}) {
+  let lastErr
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn()
+    } catch (e) {
+      lastErr = e
+      if (!RETRYABLE.has(e.kind) || attempt === retries) throw e
+      const delay = baseDelay * Math.pow(2, attempt)
+      await new Promise((r) => setTimeout(r, delay))
+    }
+  }
+  throw lastErr
 }
 
 export const api = {

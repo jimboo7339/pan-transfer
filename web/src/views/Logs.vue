@@ -2,6 +2,7 @@
 // 运行日志：按任务查看最近 10 次转存日志（可展开日志树）。
 import { ref, inject, onMounted, watch } from 'vue'
 import { taskApi, fmtTime } from '../api'
+import ErrorState from '../components/ErrorState.vue'
 
 const toast = inject('toast')
 
@@ -10,6 +11,9 @@ const taskId = ref(0)
 const runs = ref([])
 const loading = ref(false)
 const expanded = ref(new Set())
+// 加载失败要能与「真的没有运行记录」区分开：
+// 此前失败也落到同一个空状态，用户会以为"这个任务从没跑过"。
+const loadError = ref(null)
 
 async function loadTasks() {
   try {
@@ -23,11 +27,14 @@ async function loadTasks() {
 async function loadRuns() {
   if (!taskId.value) { runs.value = []; return }
   loading.value = true
+  loadError.value = null
   try {
     runs.value = (await taskApi.runs(taskId.value, 10)) || []
     expanded.value = new Set()
   } catch (e) {
-    toast(e.message, 'error')
+    // 记下错误对象，让 ErrorState 决定文案与是否给重试。
+    loadError.value = e
+    runs.value = []
   } finally {
     loading.value = false
   }
@@ -77,6 +84,9 @@ const taskName = (id) => tasks.value.find(t => t.id === id)?.task_name || `任�
       </div>
 
       <div v-if="loading" class="loading-block"><span class="spinner"></span> 加载中…</div>
+
+      <ErrorState v-else-if="loadError" :error="loadError" :on-retry="loadRuns"
+        hint="请确认服务正在运行，或该任务的运行记录已被清理（默认保留 90 天）。" />
 
       <div v-else-if="!runs.length" class="empty card">
         <div class="empty-title">「{{ taskName(taskId) }}」还没有运行记录</div>

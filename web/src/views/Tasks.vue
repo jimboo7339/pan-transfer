@@ -6,6 +6,7 @@ import TaskEdit from '../components/TaskEdit.vue'
 import TaskRuns from '../components/TaskRuns.vue'
 import TaskProgress from '../components/TaskProgress.vue'
 import BatchBar from '../components/BatchBar.vue'
+import ErrorState from '../components/ErrorState.vue'
 import { taskApi, accountApi, categoryApi, fmtTime } from '../api'
 import { cronToText } from '../cron'
 
@@ -17,6 +18,10 @@ const tasks = ref([])
 const accounts = ref([])
 const categories = ref([])
 const loading = ref(true)
+// 加载失败与「真的没有数据」必须分开渲染：
+// 此前 loading 在 finally 里无条件置 false，加载失败会顶上来一个
+// 「还没有转存任务」的空卡片，用户完全无法区分是没数据还是出错了。
+const loadError = ref(null)
 const editRef = ref(null)
 const runsRef = ref(null)
 const runningIds = ref(new Set())
@@ -99,13 +104,19 @@ const driverLabel = (type) => DRIVER_NAMES[type] || type || '未知'
 const catName = (id) => categories.value.find(c => c.id === id)?.name || ''
 
 async function reload() {
+  loadError.value = null
   try {
-    const [ts, accs, cats] = await Promise.all([taskApi.list(), accountApi.list(), categoryApi.list().catch(() => [])])
+    const [ts, accs, cats] = await Promise.all([
+      taskApi.list(),
+      accountApi.list().catch(() => []),
+      categoryApi.list().catch(() => []),
+    ])
     tasks.value = ts || []
     accounts.value = accs || []
     categories.value = cats || []
   } catch (e) {
-    toast(e.message, 'error')
+    // 记下错误对象（带 kind），让 ErrorState 决定文案与是否给重试。
+    loadError.value = e
   } finally {
     loading.value = false
   }
@@ -261,6 +272,10 @@ const statusBadge = (t) => {
     </div>
 
     <div v-if="loading" class="loading-block"><span class="spinner"></span> 加载中…</div>
+
+    <!-- 加载失败：明确区别于「真的没有数据」 -->
+    <ErrorState v-else-if="loadError" :error="loadError" :on-retry="reload"
+      hint="请确认 PanTransfer 服务正在运行，然后重试。" />
 
     <div v-else-if="!tasks.length" class="empty card">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 17l4.5-7 3.5 5 3.5-8 4.5 10"/></svg>

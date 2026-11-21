@@ -3,6 +3,7 @@
 import { ref, reactive, inject, onMounted, computed } from 'vue'
 import Modal from '../components/Modal.vue'
 import QRLogin from '../components/QRLogin.vue'
+import ErrorState from '../components/ErrorState.vue'
 import { accountApi } from '../api'
 
 const toast = inject('toast')
@@ -11,6 +12,9 @@ const confirmDialog = inject('confirmDialog')
 const accounts = ref([])
 const drivers = ref([])
 const loading = ref(true)
+// 加载失败与「还没有账号」必须区分：此前失败会顶上来一个
+// 「还没有网盘账号」的空卡片，用户会去反复点"添加账号"而不是排查服务。
+const loadError = ref(null)
 
 const showEdit = ref(false)
 const isEdit = ref(false)
@@ -28,12 +32,14 @@ const secretSet = ref({})
 const currentDriver = computed(() => drivers.value.find(d => d.name === form.driver_type))
 
 async function reload() {
+  loadError.value = null
   try {
     const [accs, drs] = await Promise.all([accountApi.list(), accountApi.drivers()])
     accounts.value = accs || []
     drivers.value = drs || []
   } catch (e) {
-    toast(e.message, 'error')
+    // 记下错误对象，让 ErrorState 决定文案与是否给重试。
+    loadError.value = e
   } finally {
     loading.value = false
   }
@@ -185,6 +191,9 @@ async function removeAcc(acc) {
     </div>
 
     <div v-if="loading" class="loading-block"><span class="spinner"></span> 加载中…</div>
+    <!-- 加载失败：明确区别于「还没有账号」 -->
+    <ErrorState v-else-if="loadError" :error="loadError" :on-retry="reload"
+      hint="请确认 PanTransfer 服务正在运行，然后重试。" />
     <div v-else-if="!accounts.length" class="empty card">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6 8-6s8 2 8 6"/></svg>
       <div class="empty-title">还没有网盘账号</div>
