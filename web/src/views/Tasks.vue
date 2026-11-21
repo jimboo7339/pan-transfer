@@ -7,6 +7,7 @@ import TaskRuns from '../components/TaskRuns.vue'
 import TaskProgress from '../components/TaskProgress.vue'
 import BatchBar from '../components/BatchBar.vue'
 import ErrorState from '../components/ErrorState.vue'
+import TaskTable from '../components/TaskTable.vue'
 import { taskApi, accountApi, categoryApi, fmtTime } from '../api'
 import { cronToText } from '../cron'
 
@@ -29,6 +30,30 @@ const runningIds = ref(new Set())
 // 当前正在展示进度的 job（同一时间只跟一个，避免多路轮询互相干扰）。
 const activeJobId = ref(0)
 const activeJobTaskId = ref(0)
+
+// 视图模式：card（默认，窄屏与手机）/ table（紧凑，管理大量任务时）。
+//
+// 为什么默认卡片而不是表格：表格需要 ≥1200px 才不挤压，
+// 而用户第一次打开面板可能是在手机上。表格视图在窄屏自动不可用。
+const viewMode = ref(localStorage.getItem('pt_task_view') || 'card')
+function setViewMode(m) {
+  viewMode.value = m
+  localStorage.setItem('pt_task_view', m)
+}
+
+// 表格视图需要账号/网盘类型信息，卡片视图是从 accounts 里查的，
+// 这里给每条任务补上同名字段，避免表格组件里再做一次 find。
+const tableTasks = computed(() =>
+  filteredTasks.value.map((t) => {
+    const acc = accounts.value.find((a) => a.id === t.account_id)
+    return {
+      ...t,
+      __account_name: acc ? acc.name : `#${t.account_id}`,
+      __driver_type: acc ? acc.driver_type : '',
+      __scheduleHuman: scheduleText(t),
+    }
+  }),
+)
 
 // 批量操作：选中的任务 ID 集合 + 浮动条引用。
 // 选中态用 Set 而不是数组：toggle 是 O(1)，判断包含也是 O(1)，
@@ -318,6 +343,14 @@ const statusBadge = (t) => {
       </div>
 
       <template v-else>
+        <!-- 视图切换：卡片（舒适）/ 表格（紧凑，≥1200px 才提供） -->
+        <div class="view-switch" role="group" aria-label="视图模式">
+          <button class="btn btn-sm" :class="{ 'btn-primary': viewMode === 'card' }"
+            @click="setViewMode('card')">卡片</button>
+          <button class="btn btn-sm" :class="{ 'btn-primary': viewMode === 'table' }"
+            @click="setViewMode('table')" title="紧凑视图（宽屏更省空间）">表格</button>
+        </div>
+
         <!-- 上：运行中的任务 -->
         <section class="task-section">
           <div class="section-head">
@@ -325,7 +358,14 @@ const statusBadge = (t) => {
             <h2 class="section-title">运行中</h2>
             <span class="section-count">{{ runningTasks.length }}</span>
           </div>
-          <div v-if="runningTasks.length" class="grid-cards">
+
+          <TaskTable v-if="viewMode === 'table' && runningTasks.length"
+            :tasks="tableTasks.filter(t => t.status !== 'paused')" :running-ids="runningIds"
+            @run="runTask" @edit="editRef.open" @runs="runsRef.open"
+            @toggle="toggleStatus" @remove="removeTask" @open="runsRef.open" />
+          <div v-else-if="viewMode === 'table'" class="section-empty">暂无运行中的任务</div>
+
+          <div v-if="viewMode === 'card' && runningTasks.length" class="grid-cards">
             <div v-for="t in runningTasks" :key="t.id"
               class="card task-card" :class="{ 'task-card-selected': isSelected(t.id) }">
               <div class="task-head">
@@ -379,7 +419,12 @@ const statusBadge = (t) => {
             <h2 class="section-title">已暂停</h2>
             <span class="section-count">{{ pausedTasks.length }}</span>
           </div>
-          <div v-if="pausedTasks.length" class="grid-cards">
+          <TaskTable v-if="viewMode === 'table' && pausedTasks.length"
+            :tasks="tableTasks.filter(t => t.status === 'paused')" :running-ids="runningIds"
+            @run="runTask" @edit="editRef.open" @runs="runsRef.open"
+            @toggle="toggleStatus" @remove="removeTask" @open="runsRef.open" />
+          <div v-else-if="viewMode === 'table'" class="section-empty">暂无已暂停的任务</div>
+          <div v-if="viewMode === 'card' && pausedTasks.length" class="grid-cards">
             <div v-for="t in pausedTasks" :key="t.id"
               class="card task-card task-card-paused" :class="{ 'task-card-selected': isSelected(t.id) }">
               <div class="task-head">
