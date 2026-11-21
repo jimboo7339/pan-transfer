@@ -3,6 +3,7 @@ import { ref, computed, inject, watch, provide } from 'vue'
 import { useRoute } from 'vue-router'
 import ThemeToggle from './components/ThemeToggle.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
+import CommandPalette from './components/CommandPalette.vue'
 import { authApi, setToken } from './api'
 
 const session = inject('session')
@@ -14,6 +15,7 @@ const password = ref('')
 const busy = ref(false)
 const sidebarOpen = ref(false)
 const confirmRef = ref(null)
+const paletteRef = ref(null)
 const authExpired = inject('authExpired')
 
 const needLogin = computed(() => session.value.loaded && session.value.auth_required && !session.value.authed)
@@ -90,6 +92,11 @@ async function doLogin() {
         PanTransfer
       </div>
       <span class="flex-1"></span>
+      <button class="btn btn-icon btn-ghost topbar-search" title="搜索（⌘K）"
+        aria-label="全局搜索" @click="paletteRef && paletteRef.open()">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
+      </button>
       <ThemeToggle compact />
     </div>
 
@@ -146,6 +153,14 @@ async function doLogin() {
       </nav>
       <div class="sidebar-footer">
         <div class="mb-8"><ThemeToggle /></div>
+        <div class="sidebar-search-hint">
+          <button class="btn btn-sm sidebar-search-btn" @click="paletteRef && paletteRef.open()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+              stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
+            搜索
+            <kbd>⌘K</kbd>
+          </button>
+        </div>
         <div>PanTransfer v{{ session.version }}</div>
         <div style="margin-top: 3px">夸克 / 光鸭 · 本机轻量部署</div>
       </div>
@@ -175,6 +190,9 @@ async function doLogin() {
 
   <!-- 统一确认弹层（替代原生 confirm） -->
   <ConfirmDialog ref="confirmRef" />
+
+  <!-- 全局搜索面板（⌘K / Ctrl+K / /） -->
+  <CommandPalette ref="paletteRef" />
 </template>
 
 <style scoped>

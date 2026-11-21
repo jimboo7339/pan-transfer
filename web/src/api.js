@@ -137,6 +137,13 @@ export const dashboardApi = {
   get: () => api.get('/api/dashboard'),
 }
 
+// 全局搜索：一次请求搜多个域，返回分组结果。
+// 参数 scope 可限定搜索范围（task/account/rule/category/run/file）。
+export const searchApi = {
+  query: (q, scope) =>
+    api.get(`/api/search?q=${encodeURIComponent(q)}${scope && scope !== 'all' ? '&scope=' + encodeURIComponent(scope) : ''}`),
+}
+
 export const backupApi = {
   list: () => api.get('/api/backup'),
   create: () => api.post('/api/backup'),

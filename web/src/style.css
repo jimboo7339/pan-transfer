@@ -76,6 +76,18 @@ code, pre { font-family: var(--mono); }
 .nav-item.active { background: var(--primary-soft); color: var(--primary); }
 .nav-item.active svg { opacity: 1; }
 .sidebar-footer { margin-top: auto; padding: 10px; font-size: 12px; color: var(--text-3); }
+/* 侧栏搜索入口：与 ThemeToggle 并列，hover 提示快捷键 */
+.sidebar-search-btn {
+  width: 100%; justify-content: flex-start; gap: 6px;
+  font-size: 12.5px; color: var(--text-3);
+}
+.sidebar-search-btn kbd {
+  margin-left: auto; font-size: 10.5px; color: var(--text-3);
+  border: 1px solid var(--border); border-radius: 4px; padding: 0 4px;
+  font-family: var(--mono); background: var(--surface-2);
+}
+/* 移动端顶栏的搜索图标：桌面端用侧栏入口，避免顶部拥挤 */
+.topbar-search { display: none; }
 
 .main { flex: 1; overflow-y: auto; padding: 26px 30px 60px; min-width: 0; }
 .page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; gap: 12px; flex-wrap: wrap; }
@@ -604,6 +616,8 @@ html.dark .toast-error { background: #7f1d1d; }
   .topbar .brand-mini { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; }
   .topbar .brand-mini .brand-logo { width: 28px; height: 28px; border-radius: 8px; }
   .topbar .brand-mini svg { width: 15px; height: 15px; }
+  /* 移动端没有侧栏，搜索入口要顶到顶栏 */
+  .topbar-search { display: inline-flex; }
 
   .sidebar {
     position: fixed; top: 0; bottom: 0; left: 0; z-index: 120;
