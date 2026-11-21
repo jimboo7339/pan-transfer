@@ -13,11 +13,12 @@
 // 列设计（按用户扫读顺序）：
 //   任务名 / 状态 / 账号 / 调度 / 上次运行 / 操作
 //
-// 操作列用图标按钮 + overflow 菜单收纳：
-//   卡片视图有 5 个按钮同权重排一行，表格里放不下；
-//   主操作（运行/编辑）直接显示，次操作（暂停/删除）进 overflow。
+// 操作列复用 TaskActions，与卡片视图**同一套按钮与菜单项**。
+// 早先表格自己写一套（5 个按钮 + 内联菜单），卡片又写另一套（5 个按钮排一行），
+// 结果同一个任务在两个视图里能做的操作不一样，加新操作时改一处漏一处。
+// 现在由构造保证一致。
 import { fmtTime } from '../api'
-import DropdownMenu from './DropdownMenu.vue'
+import TaskActions from './TaskActions.vue'
 
 defineProps({
   tasks: { type: Array, default: () => [] },
@@ -89,20 +90,10 @@ const driverLabel = (t) => DRIVER_NAMES[t] || t || '—'
             <span v-else class="muted">—</span>
           </td>
           <td>
-            <div class="table-actions">
-              <button class="btn btn-sm btn-primary" :disabled="runningIds.has(t.id)"
-                @click="emit('run', t)">
-                <span v-if="runningIds.has(t.id)" class="spinner" style="border-top-color:#fff"></span>
-                <span v-else>▶</span>
-              </button>
-              <button class="btn btn-sm" title="编辑" @click="emit('edit', t)">编辑</button>
-              <DropdownMenu :items="[
-                  { key: 'runs', label: '运行记录', icon: '📄' },
-                  { key: 'toggle', label: t.status === 'paused' ? '启用' : '暂停', icon: t.status === 'paused' ? '⏵' : '⏸' },
-                  { key: 'detail', label: '任务详情', icon: '🔗' },
-                  { key: 'remove', label: '删除任务', icon: '🗑', danger: true },
-                ]" @select="(k) => emit(k === 'detail' ? 'open' : k, t)" />
-            </div>
+            <TaskActions :task="t" :running="runningIds.has(t.id)"
+              @run="emit('run', t)" @edit="emit('edit', t)" @runs="emit('runs', t)"
+              @detail="emit('open', t)" @toggle="emit('toggle', t)"
+              @remove="emit('remove', t)" />
           </td>
         </tr>
       </tbody>

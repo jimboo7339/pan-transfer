@@ -6,6 +6,7 @@ import TaskEdit from '../components/TaskEdit.vue'
 import TaskRuns from '../components/TaskRuns.vue'
 import TaskProgress from '../components/TaskProgress.vue'
 import BatchBar from '../components/BatchBar.vue'
+import TaskActions from '../components/TaskActions.vue'
 import ErrorState from '../components/ErrorState.vue'
 import TaskTable from '../components/TaskTable.vue'
 import { taskApi, accountApi, categoryApi, fmtTime } from '../api'
@@ -415,15 +416,9 @@ const statusBadge = (t) => {
                 <span class="muted">{{ fmtTime(t.last_run_at) }}：</span>{{ t.last_run_message || '无' }}
               </div>
               <div class="task-foot">
-                <button class="btn btn-sm btn-primary" :disabled="runningIds.has(t.id)" @click="runTask(t)">
-                  <span v-if="runningIds.has(t.id)" class="spinner" style="border-top-color: #fff"></span>
-                  <span v-else>▶ 运行</span>
-                </button>
-                <button class="btn btn-sm" @click="editRef.open(t)">编辑</button>
-                <button class="btn btn-sm" @click="runsRef.open(t)">记录</button>
-                <span class="spacer"></span>
-                <button class="btn btn-sm btn-ghost" @click="toggleStatus(t)">{{ t.status === 'paused' ? '启用' : '暂停' }}</button>
-                <button class="btn btn-sm btn-danger btn-ghost" @click="removeTask(t)">删除</button>
+                <TaskActions :task="t" :running="runningIds.has(t.id)"
+                  @run="runTask(t)" @edit="editRef.open(t)" @runs="runsRef.open(t)"
+                  @detail="gotoDetail(t)" @toggle="toggleStatus(t)" @remove="removeTask(t)" />
               </div>
             </div>
           </div>
@@ -472,15 +467,9 @@ const statusBadge = (t) => {
                 <span class="muted">{{ fmtTime(t.last_run_at) }}：</span>{{ t.last_run_message || '无' }}
               </div>
               <div class="task-foot">
-                <button class="btn btn-sm btn-primary" :disabled="runningIds.has(t.id)" @click="runTask(t)">
-                  <span v-if="runningIds.has(t.id)" class="spinner" style="border-top-color: #fff"></span>
-                  <span v-else>▶ 运行</span>
-                </button>
-                <button class="btn btn-sm" @click="editRef.open(t)">编辑</button>
-                <button class="btn btn-sm" @click="runsRef.open(t)">记录</button>
-                <span class="spacer"></span>
-                <button class="btn btn-sm btn-ghost" @click="toggleStatus(t)">{{ t.status === 'paused' ? '启用' : '暂停' }}</button>
-                <button class="btn btn-sm btn-danger btn-ghost" @click="removeTask(t)">删除</button>
+                <TaskActions :task="t" :running="runningIds.has(t.id)"
+                  @run="runTask(t)" @edit="editRef.open(t)" @runs="runsRef.open(t)"
+                  @detail="gotoDetail(t)" @toggle="toggleStatus(t)" @remove="removeTask(t)" />
               </div>
             </div>
           </div>
