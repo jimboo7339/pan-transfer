@@ -16,6 +16,31 @@ const confirmDialog = inject('confirmDialog')
 const draft = useDraft('task_edit', form)
 const { confirmDiscard } = useDirtyGuard(confirmDialog, draft.dirty)
 
+// 表单分区导航。
+//
+// 为什么是锚点而不是分步向导：
+//   分步向导每一步都要校验，但配置类表单的字段依赖很多（账号决定驱动、
+//   驱动决定字段、调度模式决定 cron 是否出现），强行分步会把用户卡在某一步。
+//   锚点导航只帮定位、不打断填写，是更贴合这个表单的折中。
+const SECTIONS = [
+  { id: 'sec-basic', label: '基础' },
+  { id: 'sec-rename', label: '保存与命名' },
+  { id: 'sec-schedule', label: '调度' },
+]
+const activeSection = ref('sec-basic')
+
+// scrollTo 把目标分区滚到弹层可视区顶部。
+//
+// 用 scrollIntoView 而不是自己算 offsetTop：
+// 弹层内部是独立滚动容器，offsetTop 的参照系不是它。
+// 配合 CSS 的 scroll-margin-top，标题不会被吸顶的导航条遮住。
+function scrollTo(id) {
+  const el = document.getElementById(id)
+  if (!el) return
+  activeSection.value = id
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
 const visible = ref(false)
 const saving = ref(false)
 const isEdit = ref(false)
@@ -272,8 +297,16 @@ async function save() {
 
 <template>
   <Modal v-model="visible" size="lg" :title="isEdit ? '编辑转存任务' : '新建转存任务'">
+    <!-- 分区导航：20+ 字段的表单靠滚动找字段太慢。
+          sticky 定位在弹层头部下方，滚动时始终可见。 -->
+    <nav class="section-nav" aria-label="表单分区">
+      <button v-for="s in SECTIONS" :key="s.id"
+        class="section-nav-item" :class="{ active: activeSection === s.id }"
+        @click="scrollTo(s.id)">{{ s.label }}</button>
+    </nav>
+
           <!-- 基础信息 -->
-          <div class="modal-section" style="border-top: none; margin-top: -20px; padding-top: 0">
+          <div class="modal-section" id="sec-basic" style="border-top: none; margin-top: -20px; padding-top: 0">
             <div class="modal-section-title">基础信息</div>
             <div class="field">
               <div class="field-label">任务名称 <span class="req">*</span></div>
@@ -345,7 +378,7 @@ async function save() {
           </div>
 
           <!-- 重命名规则 -->
-          <div class="modal-section">
+          <div class="modal-section" id="sec-rename">
             <div class="modal-section-title">重命名规则（可选）</div>
             <div class="field">
               <div class="field-label">内置规则</div>
@@ -413,7 +446,7 @@ async function save() {
           </div>
 
           <!-- 调度配置 -->
-          <div class="modal-section">
+          <div class="modal-section" id="sec-schedule">
             <div class="modal-section-title">调度配置</div>
             <div class="flex mb-16" style="gap: 16px; flex-wrap: wrap">
               <label class="checkbox"><input type="radio" value="manual" v-model="scheduleMode" /> 手动运行</label>
@@ -456,3 +489,39 @@ async function save() {
   <SharePreview ref="previewRef" @use-folder="onUseFolder" />
   <FileBrowser ref="browserRef" @picked="onPickPath" />
 </template>
+
+<style scoped>
+/* 分区导航：吸顶在弹层头部下方，滚动时始终可见。
+   background 用 surface 而不是透明：滚动时下面的内容会透上来，
+   文字叠在文字上完全无法阅读。 */
+.section-nav {
+  position: sticky;
+  top: -1px;
+  z-index: 2;
+  display: flex;
+  gap: 4px;
+  padding: 8px 0 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.section-nav-item {
+  border: none;
+  background: none;
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-2);
+  font-family: var(--font);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out);
+}
+.section-nav-item:hover { background: var(--surface-2); color: var(--text); }
+.section-nav-item.active {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+/* 锚点跳转时标题不被吸顶导航条遮住 */
+:deep(.modal-section) { scroll-margin-top: 56px; }
+</style>
