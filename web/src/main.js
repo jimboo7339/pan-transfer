@@ -63,10 +63,24 @@ async function refreshSession() {
 }
 app.provide('refreshSession', refreshSession)
 
+// 401 处理：标记会话已过期并清空本地 token。
+//
+// 这里绝不能回调 refreshSession()：api.js 在抛错前会同步调用 onUnauthorized，
+// 而 refreshSession 自身要发 /api/auth/status 请求。若那个请求也 401，
+// 就会再次触发 onUnauthorized → 再发一次 → 无限递归的请求风暴
+// （每层都 await 真实 HTTP 请求，不是栈溢出，而是把后端打挂）。
+//
+// 正确做法：只更新本地状态，不发起任何网络请求。
+// 用户看到顶部横幅后自行重新登录。
+let handling401 = false
 setUnauthorizedHandler(() => {
+  if (handling401) return
+  handling401 = true
   setToken('')
   authExpired.value = true
-  refreshSession()
+  // 直接把会话标成"需要登录"，避免再发请求去问。
+  session.value = { auth_required: true, authed: false, version: '', loaded: true }
+  handling401 = false
 })
 
 initTheme()

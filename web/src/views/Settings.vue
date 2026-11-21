@@ -221,8 +221,10 @@ async function saveChannel() {
   const idx = list.findIndex(c => c.id === chForm.id)
   if (idx >= 0) list[idx] = { ...chForm }
   else list.push({ ...chForm })
-  await persist({ notify_channels: list })
-  showChannel.value = false
+  // 保存失败时保持弹层打开：否则用户填的渠道配置全部丢失，
+  // 只看到一条转瞬即逝的错误提示。
+  const ok = await persist({ notify_channels: list })
+  if (ok) showChannel.value = false
 }
 
 async function removeChannel(c) {
@@ -249,29 +251,39 @@ async function testChannel() {
   }
 }
 
+// persist 保存一批设置，成功返回 true、失败返回 false。
+//
+// 为什么返回布尔而不是静默吞异常：调用方（saveChannel / removeChannel）
+// 需要在失败后**保持弹层打开**，否则用户填的整个渠道配置会丢失，
+// 只看到一条转瞬即逝的红色 toast。
 async function persist(patch) {
   saving.value = true
   try {
     await settingsApi.save(patch)
     Object.assign(settings, await settingsApi.get())
     toast('设置已保存', 'success')
+    return true
   } catch (e) {
     toast(e.message, 'error')
+    return false
   } finally {
     saving.value = false
   }
 }
 
 function saveSchedule() {
-  if (settings.schedule_enabled === 'on' && !settings.schedule_cron.trim() && !settings.schedule_time) {
+  // 用可选链：后端若返回 null（字段缺失）会直接抛 TypeError，
+  // 而 saveSchedule 没有 try-catch，点"保存调度配置"就崩。
+  const cron = (settings.schedule_cron || '').trim()
+  if (settings.schedule_enabled === 'on' && !cron && !settings.schedule_time) {
     toast('全局调度开启时需要填写 cron 表达式或运行时间', 'error')
     return
   }
   persist({
     schedule_enabled: settings.schedule_enabled,
-    schedule_cron: settings.schedule_cron,
-    schedule_time: settings.schedule_time,
-    schedule_week: settings.schedule_week,
+    schedule_cron: cron,
+    schedule_time: settings.schedule_time || '',
+    schedule_week: settings.schedule_week || '',
   })
 }
 

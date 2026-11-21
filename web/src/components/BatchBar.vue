@@ -18,7 +18,10 @@ const props = defineProps({
   // 可选的任务分类列表（用于"移动到分类"下拉）
   categories: { type: Array, default: () => [] },
 })
-const emit = defineEmits(['done', 'clear'])
+// change / ask-delete 必须显式声明：
+//   - 未声明的事件监听器会残留在 $attrs 并被当作原生 DOM 监听器挂到根元素；
+//   - 开发模式下每个未声明事件都会警告。
+const emit = defineEmits(['done', 'clear', 'change', 'ask-delete'])
 
 const busy = ref(false)
 const progress = ref('')
@@ -42,25 +45,39 @@ const allSelected = computed(() => {
 
 const selected = ref(new Set())
 
+// emitChange 把当前选中集合同步给父组件。
+//
+// 为什么必须有这一步：卡片上的勾选框和浮动条是两套状态，
+// 父组件（Tasks.vue）用 selectedIds 决定卡片显示勾选态、并据此批量删除。
+// 早先 sync() 写好了却从未被调用 → 浮动条永远不出现、
+// 批量删除读到的永远是空集合而静默 return（点了没反应）。
+function emitChange() {
+  emit('change', new Set(selected.value))
+}
+
 function toggle(id) {
   const s = new Set(selected.value)
   s.has(id) ? s.delete(id) : s.add(id)
   selected.value = s
+  emitChange()
 }
 
 function selectAll() {
   selected.value = new Set(props.visibleTasks.map(t => t.id))
+  emitChange()
 }
 
 function clearSelection() {
   selected.value = new Set()
   lastResult.value = null
+  emitChange()
   emit('clear')
 }
 
-// 选中集合变化时通知父组件（用于卡片显示勾选态）。
-function sync() {
-  emit('change', selected.value)
+// sync 供父组件在外部清空选中后回写（保持单一数据源）。
+function sync(s) {
+  selected.value = s instanceof Set ? new Set(s) : new Set()
+  emitChange()
 }
 
 async function run(action, extra = {}) {
@@ -83,6 +100,7 @@ async function run(action, extra = {}) {
       (res.items || []).filter(i => !i.ok).map(i => i.id),
     )
     selected.value = failedIds
+    emitChange()
   } catch (e) {
     // 错误由父组件 toast（这里只负责清空进度）
     throw e

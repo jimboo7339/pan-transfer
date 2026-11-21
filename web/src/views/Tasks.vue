@@ -35,7 +35,11 @@ const activeJobTaskId = ref(0)
 //
 // 为什么默认卡片而不是表格：表格需要 ≥1200px 才不挤压，
 // 而用户第一次打开面板可能是在手机上。表格视图在窄屏自动不可用。
-const viewMode = ref(localStorage.getItem('pt_task_view') || 'card')
+//
+// 必须校验 localStorage 里的值：模板是 v-if="viewMode === 'table'" /
+// v-if="viewMode === 'card'"，若存了历史遗留值（'list'/'grid'）或被篡改，
+// 两个分支都不成立 → 运行中/已暂停两个区块全空，用户看到一片空白。
+const viewMode = ref(localStorage.getItem('pt_task_view') === 'table' ? 'table' : 'card')
 function setViewMode(m) {
   viewMode.value = m
   localStorage.setItem('pt_task_view', m)
@@ -55,11 +59,20 @@ const tableTasks = computed(() =>
   }),
 )
 
-// 批量操作：选中的任务 ID 集合 + 浮动条引用。
-// 选中态用 Set 而不是数组：toggle 是 O(1)，判断包含也是 O(1)，
-// 任务多到上百个时差别明显。
+// 批量操作：选中集合的**唯一数据源是 BatchBar**（浮动条）。
+//
+// 早先卡片自己维护 selectedIds、浮动条又维护一份 selected，两套状态互不相通：
+//   - 勾选卡片 → 浮动条认为选中 0 个 → 永远不出现；
+//   - 用浮动条的「全选」→ 卡片勾选框不变（无视觉反馈）；
+//   - 点「删除」→ 读的是卡片那套空集合 → 静默 return（点了没反应）。
+// 现在统一为：浮动条 emit('change') → 这里存进 selectedIds → 卡片据此渲染勾选态。
 const selectedIds = ref(new Set())
 const batchRef = ref(null)
+
+// onSelectionChange 接收浮动条的选中集合变化。
+function onSelectionChange(s) {
+  selectedIds.value = s instanceof Set ? s : new Set(s)
+}
 
 // 跳到任务详情（可分享、可深链）。
 // 此前点任务名只弹一个弹层，刷新就回到列表顶部、无法分享。
@@ -73,10 +86,10 @@ function gotoDetailById(id) {
 }
 
 // ---------- 批量操作 ----------
+// 卡片的勾选框只负责"切换选中"，真正的状态存在 BatchBar 里。
+// 这里把点击转发给浮动条，避免两份状态再次分叉。
 function toggleSelect(id) {
-  const s = new Set(selectedIds.value)
-  s.has(id) ? s.delete(id) : s.add(id)
-  selectedIds.value = s
+  if (batchRef.value) batchRef.value.toggle(id)
 }
 
 function isSelected(id) {
@@ -119,7 +132,7 @@ async function onBatchDone(res) {
   const alive = new Set(tasks.value.map(t => t.id))
   const s = new Set([...selectedIds.value].filter(id => alive.has(id)))
   selectedIds.value = s
-  if (batchRef.value && s.size === 0) batchRef.value.clearSelection()
+  if (batchRef.value) batchRef.value.sync(s)
 }
 
 // 筛选条件
@@ -387,7 +400,7 @@ const statusBadge = (t) => {
                   {{ t.status === 'paused' ? '⏸ 暂停' : '▶ 启用' }}
                 </span>
                 <span class="tag">{{ driverLabel(accountType(t.account_id)) }} · {{ accountName(t.account_id) }}</span>
-                <span v-if="t.links.length > 1" class="tag">多源 ×{{ t.links.length }}</span>
+                <span v-if="(t.links || []).length > 1" class="tag">多源 ×{{ t.links.length }}</span>
                 <span v-if="t.category_id" class="tag" :title="'分类回调：' + catName(t.category_id)">📁 {{ catName(t.category_id) }}</span>
                 <span v-if="t.ignore_extension" class="tag">忽略后缀</span>
               </div>
@@ -444,7 +457,7 @@ const statusBadge = (t) => {
                   {{ t.status === 'paused' ? '⏸ 暂停' : '▶ 启用' }}
                 </span>
                 <span class="tag">{{ driverLabel(accountType(t.account_id)) }} · {{ accountName(t.account_id) }}</span>
-                <span v-if="t.links.length > 1" class="tag">多源 ×{{ t.links.length }}</span>
+                <span v-if="(t.links || []).length > 1" class="tag">多源 ×{{ t.links.length }}</span>
                 <span v-if="t.category_id" class="tag" :title="'分类回调：' + catName(t.category_id)">📁 {{ catName(t.category_id) }}</span>
                 <span v-if="t.ignore_extension" class="tag">忽略后缀</span>
               </div>
@@ -479,9 +492,10 @@ const statusBadge = (t) => {
     <TaskEdit ref="editRef" @saved="reload" />
     <TaskRuns ref="runsRef" />
 
-    <!-- 批量操作浮动条：勾选卡片后出现 -->
+    <!-- 批量操作浮动条：勾选卡片后出现。
+         @change 是选中状态的唯一来源，卡片勾选框据此渲染。 -->
     <BatchBar ref="batchRef" :visible-tasks="filteredTasks" :categories="categories"
-      @done="onBatchDone" @ask-delete="askBatchDelete" />
+      @change="onSelectionChange" @done="onBatchDone" @ask-delete="askBatchDelete" />
 
     <!-- 实时进度：异步运行后不必再刷新页面猜进度 -->
     <TaskProgress v-if="activeJobId" :key="activeJobId" :job-id="activeJobId"

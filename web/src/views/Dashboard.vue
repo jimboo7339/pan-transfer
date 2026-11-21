@@ -17,28 +17,56 @@ import { ref, inject, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { dashboardApi } from '../api'
 import { cronToText } from '../cron'
+import ErrorState from '../components/ErrorState.vue'
 
 const toast = inject('toast')
 const router = useRouter()
 
 const data = ref(null)
 const loading = ref(true)
+// 加载失败与"真的没有数据"必须分开：此前失败只 toast，
+// 然后模板走 v-else-if="normalized" 的空分支，用户看到"无法加载"却没有任何重试入口。
+const loadError = ref(null)
 
 async function reload() {
   loading.value = true
+  loadError.value = null
   try {
     data.value = await dashboardApi.get()
   } catch (e) {
-    toast(e.message, 'error')
+    loadError.value = e
+    data.value = null
   } finally {
     loading.value = false
   }
 }
 onMounted(reload)
 
+// normalized 把后端聚合结果补齐默认值。
+//
+// 为什么需要：模板里直接 normalized.transfers.today_count 这种深层访问，
+// 后端 schema 一旦演进（新增/改名嵌套对象）就会 TypeError → 整页白屏。
+// 仪表盘是首屏，白屏等于整个面板不可用。
+const normalized = computed(() => {
+  const d = data.value
+  if (!d) return null
+  return {
+    transfers: {
+      today_count: 0, today_runs: 0, total_saved: 0, last_7_days: [],
+      ...d.transfers,
+    },
+    accounts: { active: 0, total: 0, ...d.accounts },
+    schedule: { enabled: false, cron: '', next_run: '', next_run_at: '', ...d.schedule },
+    tasks: { total: 0, running: 0, paused: 0, ...d.tasks },
+    running: { count: 0, ids: [], ...d.running },
+    alerts: d.alerts || [],
+    recent_failures: d.recent_failures || [],
+  }
+})
+
 const maxDay = computed(() => {
-  const days = data.value?.transfers?.last_7_days || []
-  return Math.max(1, ...days.map(d => d.count))
+  const days = normalized.value?.transfers?.last_7_days || []
+  return Math.max(1, ...days.map(d => d.count || 0))
 })
 
 // 把 cron 转成中文；失败就原样显示表达式（后端已给一次，这里兜底）。
@@ -79,10 +107,14 @@ const fmt = (t) => (t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) :
 
     <div v-if="loading" class="loading-block"><span class="spinner"></span> 加载中…</div>
 
-    <template v-else-if="data">
+    <!-- 加载失败：给重试入口，而不是只剩一句"无法加载" -->
+    <ErrorState v-else-if="loadError" :error="loadError" :on-retry="reload"
+      hint="请确认 PanTransfer 服务正在运行，然后重试。" />
+
+    <template v-else-if="normalized">
       <!-- 告警优先：坏消息不需要滚动就能看到 -->
-      <div v-if="data.alerts && data.alerts.length" class="dash-alerts">
-        <div v-for="(a, i) in data.alerts" :key="i"
+      <div v-if="normalized.alerts && normalized.alerts.length" class="dash-alerts">
+        <div v-for="(a, i) in normalized.alerts" :key="i"
           class="dash-alert" :class="'dash-alert-' + a.level"
           :style="{ cursor: a.task_id ? 'pointer' : 'default' }"
           @click="gotoTask(a.task_id)">
@@ -98,11 +130,11 @@ const fmt = (t) => (t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) :
       <div class="dash-grid">
         <div class="card dash-card">
           <div class="dash-card-label">今日转存</div>
-          <div class="dash-card-value">{{ data.transfers.today_count }}<span class="dash-unit">个</span></div>
-          <div class="dash-card-sub">跑了 {{ data.transfers.today_runs }} 次</div>
+          <div class="dash-card-value">{{ normalized.transfers.today_count }}<span class="dash-unit">个</span></div>
+          <div class="dash-card-sub">跑了 {{ normalized.transfers.today_runs }} 次</div>
           <!-- 7 天趋势条：只用高度表达，不引图表库 -->
           <div class="dash-bars">
-            <div v-for="d in data.transfers.last_7_days" :key="d.date"
+            <div v-for="d in normalized.transfers.last_7_days" :key="d.date"
               class="dash-bar-item" :title="`${d.date}：${d.count} 个`">
               <div class="dash-bar-track">
                 <div class="dash-bar-fill"
@@ -115,11 +147,11 @@ const fmt = (t) => (t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) :
 
         <div class="card dash-card">
           <div class="dash-card-label">网盘账号</div>
-          <div class="dash-card-value">{{ data.accounts.active }}<span class="dash-unit">/ {{ data.accounts.total }} 启用</span></div>
+          <div class="dash-card-value">{{ normalized.accounts.active }}<span class="dash-unit">/ {{ normalized.accounts.total }} 启用</span></div>
           <div class="dash-card-sub">
-            <template v-if="data.accounts.total === 0">还没添加账号</template>
-            <template v-else-if="data.accounts.active === 0" class="text-danger">全部已停用</template>
-            <template v-else>累计转存 {{ data.transfers.total_saved }} 个文件</template>
+            <template v-if="normalized.accounts.total === 0">还没添加账号</template>
+            <template v-else-if="normalized.accounts.active === 0" class="text-danger">全部已停用</template>
+            <template v-else>累计转存 {{ normalized.transfers.total_saved }} 个文件</template>
           </div>
           <button class="btn btn-sm dash-card-action" @click="router.push('/accounts')">
             管理账号 →
@@ -129,32 +161,32 @@ const fmt = (t) => (t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) :
         <div class="card dash-card">
           <div class="dash-card-label">调度</div>
           <div class="dash-card-value dash-card-value-sm">
-            {{ data.schedule.enabled ? '开启中' : '已关闭' }}
+            {{ normalized.schedule.enabled ? '开启中' : '已关闭' }}
           </div>
           <div class="dash-card-sub">
-            <template v-if="data.schedule.enabled && scheduleText">{{ scheduleText }}</template>
-            <template v-else-if="data.schedule.enabled">未配置 cron</template>
+            <template v-if="normalized.schedule.enabled && scheduleText">{{ scheduleText }}</template>
+            <template v-else-if="normalized.schedule.enabled">未配置 cron</template>
             <template v-else>所有任务只能手动运行</template>
           </div>
-          <div v-if="data.schedule.next_run" class="dash-card-sub">
-            下次：{{ fmt(data.schedule.next_run) }}
+          <div v-if="normalized.schedule.next_run" class="dash-card-sub">
+            下次：{{ fmt(normalized.schedule.next_run) }}
           </div>
         </div>
 
         <div class="card dash-card">
           <div class="dash-card-label">任务</div>
-          <div class="dash-card-value">{{ data.tasks.total }}</div>
+          <div class="dash-card-value">{{ normalized.tasks.total }}</div>
           <div class="dash-card-sub">
-            {{ data.tasks.running }} 运行中 · {{ data.tasks.paused }} 已暂停
+            {{ normalized.tasks.running }} 运行中 · {{ normalized.tasks.paused }} 已暂停
           </div>
-          <div v-if="data.running.count > 0" class="dash-card-sub text-success">
-            <span class="spinner spinner-sm"></span> {{ data.running.count }} 个正在转存
+          <div v-if="normalized.running.count > 0" class="dash-card-sub text-success">
+            <span class="spinner spinner-sm"></span> {{ normalized.running.count }} 个正在转存
           </div>
         </div>
       </div>
 
       <!-- 最近失败 -->
-      <div v-if="data.recent_failures && data.recent_failures.length" class="card card-pad">
+      <div v-if="normalized.recent_failures && normalized.recent_failures.length" class="card card-pad">
         <div class="card-title">最近失败</div>
         <div class="table-wrap">
           <table class="table">
@@ -166,7 +198,7 @@ const fmt = (t) => (t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) :
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(f, i) in data.recent_failures" :key="i"
+              <tr v-for="(f, i) in normalized.recent_failures" :key="i"
                 style="cursor: pointer" @click="gotoTask(f.task_id)">
                 <td class="num muted">{{ fmt(f.failed_at) }}</td>
                 <td>{{ f.task_name || ('#' + f.task_id) }}</td>

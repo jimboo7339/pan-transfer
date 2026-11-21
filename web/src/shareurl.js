@@ -10,7 +10,15 @@ export function extractShareFid(url) {
   if (!s) return ''
   const mq = s.match(/(?:\?|&)(?:fid|fileId)=([^&#]+)/)
   if (mq?.[1]) {
-    const v = decodeURIComponent(String(mq[1]).trim())
+    // decodeURIComponent 对非法转义会抛 URIError（如 ...?fid=%E4%B8）。
+    // 这个函数在 TaskEdit 模板里被调用，异常会让整个任务页渲染失败，
+    // 所以必须吞掉并返回空串（视为"没有锁定文件夹"）。
+    let v = ''
+    try {
+      v = decodeURIComponent(String(mq[1]).trim())
+    } catch {
+      return ''
+    }
     if (!ROOT_FIDS.has(v.toLowerCase())) return v
   }
   const m1 = s.match(/#\/list\/share\/([A-Za-z0-9_-]{6,64})/)

@@ -15,6 +15,10 @@ const { showHelp: showHotkeysHelp } = useHotkeys()
 const session = inject('session')
 const refreshSession = inject('refreshSession')
 const toast = inject('toast')
+// 必须注入 toasts 数组本身：模板里的 v-for="t in toasts" 只从 setup 作用域
+// 解析标识符，不会去读 provide。漏掉这一行不会报错（renderList(undefined)
+// 静默渲染空列表），后果是所有 toast 都发出去但一条也看不见。
+const toasts = inject('toasts')
 const route = useRoute()
 
 const password = ref('')

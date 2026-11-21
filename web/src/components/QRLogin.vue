@@ -55,9 +55,20 @@ function schedulePoll(driverType) {
         return
       }
       if (res.status === 'success' && res.config_json) {
+        // JSON.parse 必须包 try-catch：这里在 setTimeout 回调里，
+        // 抛出的异常不会被外层 tick 的 try/catch 捕获（那是上一轮）。
+        // 后果是 visible 永远不关闭、一直显示"登录成功！"，用户只能手动关。
+        let cfg
+        try {
+          cfg = JSON.parse(res.config_json)
+        } catch {
+          status.value = 'failed'
+          qrHint.value = '登录返回的账号配置无法解析，请重试扫码'
+          return
+        }
         status.value = 'success'
         qrHint.value = '登录成功！'
-        emit('success', JSON.parse(res.config_json))
+        emit('success', cfg)
         setTimeout(() => { visible.value = false }, 800)
         return
       }

@@ -19,7 +19,7 @@
 //   - 只在用户主动填写后才写（不写初始值）
 //   - 提供"清除草稿"的入口
 //   - key 用页面/实体名而不是 ID，避免账号删除后草稿还在
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 
 const PREFIX = 'pt_draft_'
 
@@ -102,6 +102,10 @@ export function useDraft(key, target) {
   const stop = () => {
     if (timer) { clearTimeout(timer); timer = null }
     if (stopWatch) { stopWatch(); stopWatch = null }
+    // 必须清 dirty：否则用户打开表单、什么都没改就关闭，
+    // 也会弹「放弃未保存的修改？」——用户明确知道没改，久了就无脑点确认，
+    // 这个确认框也就失去了保护意义。
+    dirty.value = false
   }
 
   // restore 把草稿合并回 target。

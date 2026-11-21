@@ -3,13 +3,27 @@
 // 错误分类（kind）让 UI 能决定「重试 / 重新登录 / 就地提示」，而不是一律
 // 弹一个 toast。此前所有错误都是同一个 toast，401 时用户看到"HTTP 401"
 // 并不知道要重新输入密码；网络抖动一次就白屏。
-let token = localStorage.getItem('pt_token') || ''
+let token = readStoredToken()
 let onUnauthorized = null
+
+// localStorage 在某些环境（Safari 隐私模式、沙箱 iframe、file://）会抛
+// SecurityError。这个模块被 main.js 直接 import，抛异常等于应用无法启动。
+function readStoredToken() {
+  try {
+    return localStorage.getItem('pt_token') || ''
+  } catch {
+    return ''
+  }
+}
 
 export function setToken(t) {
   token = t || ''
-  if (token) localStorage.setItem('pt_token', token)
-  else localStorage.removeItem('pt_token')
+  try {
+    if (token) localStorage.setItem('pt_token', token)
+    else localStorage.removeItem('pt_token')
+  } catch {
+    // 存不下时 token 只在内存里有效（刷新后需重新登录），但不该崩
+  }
 }
 export function getToken() { return token }
 export function setUnauthorizedHandler(fn) { onUnauthorized = fn }

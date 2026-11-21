@@ -13,9 +13,6 @@ import { useDraft, useDirtyGuard } from '../composables/useDraft'
 const toast = inject('toast')
 const confirmDialog = inject('confirmDialog')
 
-const draft = useDraft('task_edit', form)
-const { confirmDiscard } = useDirtyGuard(confirmDialog, draft.dirty)
-
 // 表单分区导航。
 //
 // 为什么是锚点而不是分步向导：
@@ -70,6 +67,13 @@ const form = reactive({
   run_mode: 'manual',
   status: 'running',
 })
+
+// 草稿必须在 form 声明之后创建：useDraft 内部会立即读一次 form 做初始快照，
+// 放在 reactive() 之前会踩 TDZ（Cannot access 'form' before initialization），
+// 而这个异常发生在 setup 同步阶段 → 整个任务页白屏。
+const draft = useDraft('task_edit', form)
+const { confirmDiscard } = useDirtyGuard(confirmDialog, draft.dirty)
+
 const scheduleMode = ref('manual') // manual | global | custom
 const globalSchedule = ref(null)   // 设置页返回
 const nextRunText = ref('')        // 当前编辑的 cron 下次执行时间

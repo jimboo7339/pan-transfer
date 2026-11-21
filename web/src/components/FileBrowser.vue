@@ -21,11 +21,20 @@ function open(accId, initialPath = '') {
   accountId.value = accId
   visible.value = true
   trail.value = []
+  // 先重置再解析：否则弹层打开的一瞬间会显示上一次浏览的目录内容
+  // （fid 还是旧值），底部"当前：/…"与列表都是脏的。
+  fid.value = '0'
+  items.value = []
   if (initialPath) {
     // 从路径解析起点目录
     fileApi.resolve(accId, initialPath).then(res => {
       fid.value = res.fid
-      trail.value = [{ fid: '0', name: '根目录' }]
+      // trail 必须包含"当前目录"这一项：pick() 是靠 trail 拼路径的，
+      // 少了当前目录 → 用户点"选择此目录"时路径变成根目录，已填的保存路径被清空。
+      trail.value = [
+        { fid: '0', name: '根目录' },
+        { fid: res.fid, name: res.name || initialPath.split('/').filter(Boolean).pop() || '当前目录' },
+      ]
       load(fid.value)
     }).catch(() => { fid.value = '0'; load('0') })
   } else {
@@ -46,6 +55,18 @@ async function load(target) {
   } finally {
     loading.value = false
   }
+}
+
+// pick 返回当前目录：trail 的最后一项就是当前目录（open/enter 都保证这点）。
+// 早先这里用 trail.map(name).join('/') 拼路径，而 trail 的语义是"祖先链"，
+// 从 initialPath 进入时 trail 只有 [根目录] → 拼出 '/' → 保存路径被清空。
+function pick() {
+  const cur = trail.value[trail.value.length - 1]
+  const path = cur && cur.name && cur.name !== '根目录'
+    ? '/' + trail.value.slice(1).map(t => t.name).filter(Boolean).join('/')
+    : ''
+  emit('picked', { path: path === '/' ? '' : path, fid: fid.value })
+  visible.value = false
 }
 
 function enter(item) {
@@ -73,12 +94,6 @@ async function mkdir() {
   } finally {
     creating.value = false
   }
-}
-
-function pick() {
-  const path = '/' + trail.value.map(t => t.name).filter(n => n && n !== '根目录').join('/')
-  emit('picked', { path: path === '/' ? '' : path, fid: fid.value })
-  visible.value = false
 }
 </script>
 

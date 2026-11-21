@@ -11,7 +11,7 @@
 //   - 关闭时把焦点还给触发元素（否则键盘用户会"丢失位置"）
 //   - 打开时锁 body 滚动（否则背景会跟着滚）
 //   - 焦点陷阱：Tab 不会跑到弹层外面的页面元素上
-import { watch, nextTick, ref } from 'vue'
+import { watch, nextTick, ref, onUnmounted } from 'vue'
 
 const props = defineProps({
   modelValue: Boolean,
@@ -65,14 +65,25 @@ function onKey(e) {
 	}
 }
 
+// 滚动锁用引用计数，而不是单个 dataset 槽位。
+//
+// 为什么必须计数：弹层是会嵌套的（TaskEdit → SharePreview → ConfirmDialog）。
+// 用单槽位时，内层弹层保存的"前值"已经是 hidden，关闭内层时把 hidden
+// 还原回去（等于没解开），再关闭外层时槽位已被删除 → 什么都不做 →
+// body 永久 overflow:hidden，整个应用再也滚不动，只能刷新浏览器。
+let lockCount = 0
+let prevOverflow = ''
+
 function lockScroll(locked) {
-  // 保存原来的 overflow，避免覆盖别的弹层设置的值。
   if (locked) {
-    document.body.dataset.modalPrevOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-  } else if (document.body.dataset.modalPrevOverflow !== undefined) {
-    document.body.style.overflow = document.body.dataset.modalPrevOverflow
-    delete document.body.dataset.modalPrevOverflow
+    if (lockCount === 0) {
+      prevOverflow = document.body.style.overflow
+      document.body.style.overflow = 'hidden'
+    }
+    lockCount++
+  } else {
+    lockCount = Math.max(0, lockCount - 1)
+    if (lockCount === 0) document.body.style.overflow = prevOverflow
   }
 }
 
@@ -99,6 +110,16 @@ watch(
     }
   },
 )
+
+// 组件在打开状态下被卸载时（路由跳转、v-if 收起父组件），
+// watch 的 else 分支不会执行，会留下两个问题：
+//   1. window 上的 keydown 监听器泄漏；
+//   2. body 的 overflow 锁不释放 → 整个应用永久无法滚动。
+// 这里做兜底清理。
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKey)
+  if (props.modelValue) lockScroll(false)
+})
 </script>
 
 <template>
