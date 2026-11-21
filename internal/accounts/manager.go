@@ -22,7 +22,14 @@ const DefaultRequestIntervalMS = 300
 
 // Manager 持有账号驱动实例缓存。
 type Manager struct {
-	st *store.Store
+	// stMu 保护 st 的并发读。
+	//
+	// 写侧只有 Reload（还原备份时调用，从 HTTP handler goroutine）。
+	// 读侧是每次请求：RequestInterval / instance / mergeCredentials。
+	// 早先 Reload 在 m.mu 内写 st，而所有读点都不持锁 ——
+	// 属于"写加锁、读不加锁"的经典错误，锁形同虚设。
+	stMu sync.RWMutex
+	st   *store.Store
 
 	mu        sync.Mutex
 	instances map[int64]driver.Driver
@@ -50,13 +57,26 @@ func New(st *store.Store) *Manager {
 	}
 }
 
+// store 返回当前存储句柄（持读锁取快照）。
+//
+// 所有读库路径必须通过它，而不是直接读 m.st：
+// 后者与 Reload 的写并发，且可能指向已 Close 的旧库。
+func (m *Manager) store() *store.Store {
+	m.stMu.RLock()
+	st := m.st
+	m.stMu.RUnlock()
+	return st
+}
+
 // RequestInterval 返回当前配置的账号级请求间隔。
 // 设置项 request_interval_ms 为空或非法时回落到 DefaultRequestIntervalMS。
 func (m *Manager) RequestInterval(ctx context.Context) time.Duration {
 	ms := DefaultRequestIntervalMS
-	if v, err := m.st.GetSetting(ctx, "request_interval_ms"); err == nil {
-		if n, e := strconv.Atoi(strings.TrimSpace(v)); e == nil && n >= 0 {
-			ms = n
+	if st := m.store(); st != nil {
+		if v, err := st.GetSetting(ctx, "request_interval_ms"); err == nil {
+			if n, e := strconv.Atoi(strings.TrimSpace(v)); e == nil && n >= 0 {
+				ms = n
+			}
 		}
 	}
 	return time.Duration(ms) * time.Millisecond
@@ -80,7 +100,11 @@ func (m *Manager) instance(ctx context.Context, accountID int64) (driver.Driver,
 	}
 	m.mu.Unlock()
 
-	acc, err := m.st.GetAccount(ctx, accountID)
+	st := m.store()
+	if st == nil {
+		return nil, domain.Errorf(domain.CodeInternal, "存储尚未初始化")
+	}
+	acc, err := st.GetAccount(ctx, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -142,8 +166,14 @@ func (m *Manager) Reload(st *store.Store) {
 	m.mu.Lock()
 	old := m.instances
 	m.instances = map[int64]driver.Driver{}
-	m.st = st
 	m.mu.Unlock()
+
+	// st 的写必须在 stMu 内，不能用 m.mu 代替：
+	// 读侧（RequestInterval / instance / mergeCredentials）持的是 stMu，
+	// 写侧若换成另一把锁，两边就不互斥了。
+	m.stMu.Lock()
+	m.st = st
+	m.stMu.Unlock()
 
 	ctx := context.Background()
 	for id, drv := range old {
@@ -175,8 +205,28 @@ func (m *Manager) Probe(ctx context.Context, accountID int64) error {
 }
 
 // mergeCredentials 把驱动回传的凭据合并进账号配置 JSON 并落库。
+//
+// 并发说明：acc 是 build 时从 GetAccount 拿到的共享对象，
+// 同一账号的驱动实例会被并发使用（运行中的 job + 同时的 Probe / 文件列表）。
+// 若两个 token 刷新同时 read-modify-write acc.Config，会丢失更新——
+// 一个刷新的新 token 被另一个覆盖，正是 refresh_guard 想避免的
+// "账号莫名失效"。因此这里在锁内完成"读库→合并→写库"，
+// 保证同一账号的凭据回写串行化。
 func (m *Manager) mergeCredentials(ctx context.Context, acc *store.Account, creds domain.AuthCredentials) error {
-	cfg := store.ParseAccountConfig(acc.Config)
+	m.stMu.Lock()
+	defer m.stMu.Unlock()
+
+	st := m.st
+	if st == nil {
+		return domain.Errorf(domain.CodeInternal, "存储尚未初始化")
+	}
+	// 从库里重新读当前配置，而不是用传进来的 acc.Config：
+	// 后者可能是几分钟前 build 时的快照，中间可能已被别的刷新写过。
+	latest, err := st.GetAccount(ctx, acc.ID)
+	if err != nil {
+		return err
+	}
+	cfg := store.ParseAccountConfig(latest.Config)
 	if c := strings.TrimSpace(creds.Cookie); c != "" {
 		cfg["cookie"] = c
 	}
@@ -190,8 +240,8 @@ func (m *Manager) mergeCredentials(ctx context.Context, acc *store.Account, cred
 	if err != nil {
 		return err
 	}
-	acc.Config = string(raw)
-	return m.st.UpdateAccount(ctx, acc)
+	latest.Config = string(raw)
+	return st.UpdateAccount(ctx, latest)
 }
 
 // DriverInfoOut 是前端驱动选择所需的元信息（含 Addition 表单 schema）。

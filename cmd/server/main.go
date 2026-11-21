@@ -76,19 +76,29 @@ func (rt *runtime) attachService(svc *transfer.Service) {
 // restoreFrom 用备份替换数据库并重建全部依赖。
 //
 // 顺序很关键：
-//  1. 先停调度（否则 sweep 会在关库瞬间写库，导致还原后的库被污染）；
+//  1. 先停调度（不再接新任务），并等在途任务跑完——它们持有旧库句柄，
+//     换库后继续写会打到已关闭的库上，甚至把还原前的半截数据写进新库；
 //  2. 关闭旧连接（SQLite 不允许在打开时替换底层文件）；
 //  3. 复制快照 + 删除旧 WAL（旧事务重放到新库会造成数据错乱）；
-//  4. 重新打开并重建 Manager（丢弃全部驱动实例——它们持有还原前的凭据）。
+//  4. 重新打开并重建 Manager（丢弃全部驱动实例——它们持有还原前的凭据）；
+//  5. 重启调度（关键！早先漏了这一步，Close 之后 appCtx 已取消，
+//     导致「还原一次之后定时任务再也不触发」，且后续手动运行也会立刻失败）。
 func (rt *runtime) restoreFrom(backupPath string) error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 
-	dbPath := filepath.Join(rt.data, "pantransfer.db")
+	dbPath := rt.dbPath()
 
-	// 1. 停调度。Close 会 cancel 掉调度循环的 context。
-	if rt.svc != nil {
-		rt.svc.Close()
+	svc := rt.svc
+
+	// 1. 停调度，等在途任务结束。
+	//    这里不能用 Close()：Close 会 cancel appCtx，
+	//    在途任务会立刻失败并留下"运行中断"的记录。
+	if svc != nil {
+		svc.StopScheduling()
+		if !svc.WaitRunning(2 * time.Minute) {
+			return fmt.Errorf("有任务仍在运行，请等待其完成后再还原")
+		}
 	}
 
 	// 2. 关库。
@@ -100,19 +110,40 @@ func (rt *runtime) restoreFrom(backupPath string) error {
 	plan, err := (&store.Store{}).PrepareRestore(backupPath, dbPath)
 	if err != nil {
 		rt.reopenLocked(dbPath)
+		rt.resumeScheduling()
 		return err
 	}
 	if err := plan.ApplyRestore(); err != nil {
 		rt.reopenLocked(dbPath)
+		rt.resumeScheduling()
 		return err
 	}
 
 	// 4. 重开并重建。
 	rt.reopenLocked(dbPath)
 	if rt.st == nil {
+		rt.resumeScheduling()
 		return fmt.Errorf("还原后无法重新打开数据库")
 	}
+
+	// 5. 重启调度。
+	rt.resumeScheduling()
 	return nil
+}
+
+// dbPath 返回当前数据库的完整路径。
+//
+// 早先这个路径在三处硬编码（main、restoreFrom、Deps.DBPath），
+// 改一次文件名就会让还原静默失效（打开一个新库）。
+func (rt *runtime) dbPath() string {
+	return filepath.Join(rt.data, "pantransfer.db")
+}
+
+// resumeScheduling 重新拉起调度循环。
+func (rt *runtime) resumeScheduling() {
+	if rt.svc != nil {
+		rt.svc.RestartScheduling()
+	}
 }
 
 // reopenLocked 关闭旧句柄并重新打开 + 重建依赖。调用方必须已持锁。
