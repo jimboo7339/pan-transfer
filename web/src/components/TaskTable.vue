@@ -17,6 +17,7 @@
 //   卡片视图有 5 个按钮同权重排一行，表格里放不下；
 //   主操作（运行/编辑）直接显示，次操作（暂停/删除）进 overflow。
 import { fmtTime } from '../api'
+import DropdownMenu from './DropdownMenu.vue'
 
 defineProps({
   tasks: { type: Array, default: () => [] },
@@ -95,14 +96,12 @@ const driverLabel = (t) => DRIVER_NAMES[t] || t || '—'
                 <span v-else>▶</span>
               </button>
               <button class="btn btn-sm" title="编辑" @click="emit('edit', t)">编辑</button>
-              <button class="btn btn-sm" title="运行记录" @click="emit('runs', t)">记录</button>
-              <button class="btn btn-sm btn-ghost" :title="t.status === 'paused' ? '启用' : '暂停'"
-                @click="emit('toggle', t)">
-                {{ t.status === 'paused' ? '⏵' : '⏸' }}
-              </button>
-              <button class="btn btn-sm btn-danger btn-ghost" title="删除" @click="emit('remove', t)">
-                ✕
-              </button>
+              <DropdownMenu :items="[
+                  { key: 'runs', label: '运行记录', icon: '📄' },
+                  { key: 'toggle', label: t.status === 'paused' ? '启用' : '暂停', icon: t.status === 'paused' ? '⏵' : '⏸' },
+                  { key: 'detail', label: '任务详情', icon: '🔗' },
+                  { key: 'remove', label: '删除任务', icon: '🗑', danger: true },
+                ]" @select="(k) => emit(k === 'detail' ? 'open' : k, t)" />
             </div>
           </td>
         </tr>

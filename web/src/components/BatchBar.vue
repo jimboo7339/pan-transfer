@@ -15,6 +15,8 @@ import { taskApi } from '../api'
 const props = defineProps({
   // 当前筛选后可见的任务列表（用于「全选」的语义：只选可见项）
   visibleTasks: { type: Array, default: () => [] },
+  // 可选的任务分类列表（用于"移动到分类"下拉）
+  categories: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['done', 'clear'])
 
@@ -22,6 +24,15 @@ const busy = ref(false)
 const progress = ref('')
 const lastResult = ref(null)
 const showFailed = ref(false)
+
+// 「移动到分类」「改调度」两个动作的目标值。
+// '' = 尚未选择。
+const targetCategory = ref('')
+const targetMode = ref('')
+// 是否动过下拉框：批量写 N 个任务是不可逆操作，
+// 不能因为下拉框默认值存在就自动执行。
+const categoryTouched = ref(false)
+const modeTouched = ref(false)
 
 const selectedCount = computed(() => selected.value.size)
 const allSelected = computed(() => {
@@ -81,6 +92,22 @@ async function run(action, extra = {}) {
   }
 }
 
+// 把「移动到分类」的两步（选值 + 应用）合并成一个动作。
+// 单独抽出来是为了让"选完再点应用"这一步显式发生：
+// 批量写 N 个任务不可逆，不能因为下拉框有值就自动执行。
+async function applyCategory() {
+  if (!categoryTouched.value || targetCategory.value === '') return
+  await run('set_category', { category_id: Number(targetCategory.value) || 0 })
+}
+
+async function applyMode() {
+  if (!modeTouched.value || !targetMode.value) return
+  await run('set_mode', { run_mode: targetMode.value })
+}
+
+function onCategoryChange() { categoryTouched.value = true }
+function onModeChange() { modeTouched.value = true }
+
 defineExpose({ selected, clearSelection, toggle, selectAll, sync })
 </script>
 
@@ -118,6 +145,30 @@ defineExpose({ selected, clearSelection, toggle, selectAll, sync })
           <button class="btn btn-sm btn-danger" :disabled="busy" @click="$emit('ask-delete')">
             🗑 删除
           </button>
+
+          <!-- 移动分类：选完再点「应用」才执行。
+               批量写 N 个任务不可逆，不能因为下拉框有默认值就自动触发。 -->
+          <div v-if="categories.length" class="batch-select">
+            <select class="select" v-model="targetCategory" @change="onCategoryChange">
+              <option value="" disabled>移动到分类…</option>
+              <option value="0">（未分类）</option>
+              <option v-for="c in categories" :key="c.id" :value="String(c.id)">{{ c.name }}</option>
+            </select>
+            <button v-if="categoryTouched" class="btn btn-sm" :disabled="busy"
+              @click="applyCategory">应用</button>
+          </div>
+
+          <!-- 改调度模式 -->
+          <div class="batch-select">
+            <select class="select" v-model="targetMode" @change="onModeChange">
+              <option value="" disabled>调度模式…</option>
+              <option value="manual">手动运行</option>
+              <option value="global">跟随全局</option>
+              <option value="custom">自定义定时</option>
+            </select>
+            <button v-if="modeTouched" class="btn btn-sm" :disabled="busy"
+              @click="applyMode">应用</button>
+          </div>
         </template>
       </div>
 
@@ -157,6 +208,9 @@ defineExpose({ selected, clearSelection, toggle, selectAll, sync })
   padding: 10px 14px;
 }
 .batch-count { font-size: 13px; color: var(--text-2); white-space: nowrap; }
+/* 批量下拉：窄屏时占满整行，避免七个控件挤成两行 */
+.batch-select { display: inline-flex; gap: 6px; align-items: center; }
+.batch-select .select { height: 30px; font-size: 12.5px; width: auto; min-width: 110px; }
 .batch-failed {
   border-top: 1px solid var(--border);
   padding: 8px 14px 12px;

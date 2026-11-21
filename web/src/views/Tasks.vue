@@ -67,6 +67,11 @@ function gotoDetail(t) {
   router.push(`/tasks/${t.id}`)
 }
 
+// 表格视图的「任务详情」菜单项也走这里。
+function gotoDetailById(id) {
+  if (id) router.push(`/tasks/${id}`)
+}
+
 // ---------- 批量操作 ----------
 function toggleSelect(id) {
   const s = new Set(selectedIds.value)
@@ -362,7 +367,7 @@ const statusBadge = (t) => {
           <TaskTable v-if="viewMode === 'table' && runningTasks.length"
             :tasks="tableTasks.filter(t => t.status !== 'paused')" :running-ids="runningIds"
             @run="runTask" @edit="editRef.open" @runs="runsRef.open"
-            @toggle="toggleStatus" @remove="removeTask" @open="runsRef.open" />
+            @toggle="toggleStatus" @remove="removeTask" @open="gotoDetail" />
           <div v-else-if="viewMode === 'table'" class="section-empty">暂无运行中的任务</div>
 
           <div v-if="viewMode === 'card' && runningTasks.length" class="grid-cards">
@@ -422,7 +427,7 @@ const statusBadge = (t) => {
           <TaskTable v-if="viewMode === 'table' && pausedTasks.length"
             :tasks="tableTasks.filter(t => t.status === 'paused')" :running-ids="runningIds"
             @run="runTask" @edit="editRef.open" @runs="runsRef.open"
-            @toggle="toggleStatus" @remove="removeTask" @open="runsRef.open" />
+            @toggle="toggleStatus" @remove="removeTask" @open="gotoDetail" />
           <div v-else-if="viewMode === 'table'" class="section-empty">暂无已暂停的任务</div>
           <div v-if="viewMode === 'card' && pausedTasks.length" class="grid-cards">
             <div v-for="t in pausedTasks" :key="t.id"
@@ -475,7 +480,7 @@ const statusBadge = (t) => {
     <TaskRuns ref="runsRef" />
 
     <!-- 批量操作浮动条：勾选卡片后出现 -->
-    <BatchBar ref="batchRef" :visible-tasks="filteredTasks"
+    <BatchBar ref="batchRef" :visible-tasks="filteredTasks" :categories="categories"
       @done="onBatchDone" @ask-delete="askBatchDelete" />
 
     <!-- 实时进度：异步运行后不必再刷新页面猜进度 -->
