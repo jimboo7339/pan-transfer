@@ -163,46 +163,86 @@ jobs:
               *)         tar -czf "${d}.tar.gz" "$d" ;;
             esac
           done
-          # 校验和：用户下载后可自行核对（供应链完整性的最低成本手段）
-          sha256sum pan-transfer-*.tar.gz pan-transfer-*.zip > SHA256SUMS.txt || true
-          ls -la
+          # 校验和：用户下载后可自行核对（供应链完整性的最低成本手段）。
+          # 写到仓库根目录而不是 dist/：后面生成 Release Notes 时从根目录读，
+          # 路径最短、最不容易出错。
+          sha256sum pan-transfer-*.tar.gz pan-transfer-*.zip > "${GITHUB_WORKSPACE}/SHA256SUMS.txt"
+          cd "${GITHUB_WORKSPACE}"
+          echo '--- dist/ ---'
+          ls -la dist/ | head -20
+          echo '--- SHA256SUMS.txt ---'
+          cat SHA256SUMS.txt
 
       - name: generate release notes
         id: notes
         run: |
-          set -euo pipefail
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          set -uo pipefail
+          # 注意：不要用 set -e，否则 git describe 在"找不到上一个 tag"时
+          # 会让整个 step 失败（首次发版必然走到这条路径）。
+          #
+          # 另一个关键点：GitHub 会把 step 的工作目录设为 GITHUB_WORKSPACE，
+          # 而 softprops/action-gh-release 读 body_path 时用的是**仓库根目录**。
+          # 如果这里 cd 到 dist 再写文件，body_path 就找不到了，
+          # 结果是 Release 正文为空（而不是报错）——所以这里全程用绝对路径。
+          VERSION="${GITHUB_REF_NAME}"
+          NOTES_FILE="${GITHUB_WORKSPACE}/RELEASE_NOTES.md"
+
+          # 上一个 tag：找 <当前 tag>^ 上最近的 tag。找不到就留空（首次发版）。
+          PREV_TAG=$(git describe --tags --abbrev=0 "${VERSION}^" 2>/dev/null || true)
+          if [ -z "$PREV_TAG" ]; then
+            PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          fi
+
+          if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "$VERSION" ]; then
+            RANGE="${PREV_TAG}..${VERSION}"
+            RANGE_LABEL="`git log -1 --pretty=%h ${PREV_TAG}`..`git log -1 --pretty=%h ${VERSION}`"
+          else
+            RANGE="$VERSION"
+            RANGE_LABEL="全部提交"
+          fi
+
           {
             echo "## 变更"
             echo
-            if [ -n "$PREV_TAG" ]; then
-              RANGE="${PREV_TAG}..${{ github.ref_name }}"
+            echo "> 范围：\`${RANGE_LABEL}\`"
+            echo
+            NOTES=$(git log --pretty=format:'%s' "$RANGE" 2>/dev/null || true)
+            if [ -n "$NOTES" ]; then
+              # 把 conventional commit 前缀转成可读格式；
+              # 没有前缀的提交原样输出（不是所有提交都遵循该规范）。
+              echo "$NOTES" \
+                | sed -E 's/^([a-zA-Z]+)(\([^)]*\))?:[[:space:]]*/- [\1] /' \
+                | sed -E 's/^- \[([a-zA-Z]+)\] (.*)$/- **\1**：\2/'
             else
-              RANGE="HEAD"
+              echo "- （本次发布没有可列出的提交）"
             fi
-            # 按 conventional commit 前缀分组，比一长串列表可读
-            git log --pretty=format:'%s' "$RANGE" \
-              | grep -E '^[a-zA-Z]+(\(|:)' \
-              | sed -E 's/^([a-zA-Z]+)(\([^)]*\))?:[[:space:]]*/- [\1] /' \
-              || echo "- （无提交）"
             echo
             echo "## 升级说明"
             echo
             echo '```bash'
-            echo '# Docker'
+            echo '# Docker（推荐）'
             echo 'docker compose pull && docker compose up -d'
             echo '```'
             echo
-            echo '凭据与任务都在 \`data/\` 卷里，升级镜像不丢数据。'
-            echo '**备份请连 \`master.key\` 一起保存**，否则备份里的凭据无法解密。'
+            echo '也支持直接下载下方的二进制包：解压后执行'
+            echo '`./pan-transfer -addr :8935 -data ./data`，浏览器打开 http://127.0.0.1:8935'
+            echo
+            echo '> 凭据与任务都在 `data/` 卷（或 `./data` 目录）里，升级镜像不丢数据。'
+            echo '> **备份时请连 `master.key` 一起保存**：没有主密钥，备份里的凭据无法解密。'
             echo
             echo '## 校验和'
             echo
             echo '```'
-            cat SHA256SUMS.txt 2>/dev/null || echo '(无)'
+            if [ -f "${GITHUB_WORKSPACE}/SHA256SUMS.txt" ]; then
+              cat "${GITHUB_WORKSPACE}/SHA256SUMS.txt"
+            else
+              echo '(无)'
+            fi
             echo '```'
-          } > RELEASE_NOTES.md
-          head -40 RELEASE_NOTES.md
+          } > "$NOTES_FILE"
+
+          echo "--- wrote $NOTES_FILE ($(( $(wc -c < "$NOTES_FILE") )) bytes) ---"
+          cat "$NOTES_FILE"
 
       - name: create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -211,6 +251,6 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.zip
-            dist/SHA256SUMS.txt
+            SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
