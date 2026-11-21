@@ -96,9 +96,13 @@ type Service struct {
 	// schedMu 保护以下调度可观测字段（与 lastTrigger 同锁，避免额外加锁层级）。
 	lastSweep    time.Time // 最近一次 sweep 完成时间
 	schedEnabled bool      // 最近一次 sweep 观察到的全局调度开关状态
+	sweeps       int64     // sweep 完成次数（区分"从未扫描"与"扫描到已关闭"）
 
 	appCtx context.Context
 	cancel context.CancelFunc
+
+	// jobs 是异步任务句柄表（内存态，进程重启即清空）。
+	jobs *jobRegistry
 }
 
 // sweepInterval 是调度扫描粒度，与 Start 里的 ticker 周期一致。
@@ -123,6 +127,7 @@ func New(opts Options) *Service {
 		rounds:      map[int64]*callbackRound{},
 		appCtx:      ctx,
 		cancel:      cancel,
+		jobs:        newJobRegistry(50),
 	}
 }
 
@@ -164,6 +169,9 @@ type Stats struct {
 	NextSweepAt string `json:"next_sweep_at,omitempty"`
 	// SchedulingEnabled 反映全局调度开关。
 	SchedulingEnabled bool `json:"scheduling_enabled"`
+	// SweepsCompleted 是已完成扫描次数；0 表示还没跑过第一次。
+	// 深度健康检查靠它区分"从未扫描"（正常）与"扫描到已关闭"（用户主动关）。
+	SweepsCompleted bool `json:"sweeps_completed"`
 }
 
 // Stats 返回调度器运行时快照。
@@ -182,8 +190,10 @@ func (s *Service) Stats(ctx context.Context) Stats {
 	s.schedMu.Lock()
 	last := s.lastSweep
 	schedEnabled := s.schedEnabled
+	sweeps := s.sweeps
 	s.schedMu.Unlock()
 
+	out.SweepsCompleted = sweeps > 0
 	if !last.IsZero() {
 		out.LastSweepAt = last.Format(time.RFC3339)
 		out.NextSweepAt = last.Add(sweepInterval).Format(time.RFC3339)
@@ -320,6 +330,7 @@ func (s *Service) sweep() {
 	s.schedMu.Lock()
 	s.lastSweep = time.Now()
 	s.schedEnabled = enabled != "off"
+	s.sweeps++
 	s.schedMu.Unlock()
 
 	if enabled == "off" {
@@ -464,6 +475,101 @@ func (s *Service) RunTaskNow(ctx context.Context, taskID int64) (*RunResult, err
 	return s.RunTask(ctx, taskID, "manual")
 }
 
+// StartTask 异步执行任务：立即返回 job 句柄，转存在后台 goroutine 里跑。
+//
+// 与 RunTaskNow 的区别只在"调用方是否等待"。API 层用它，因为同步等待最长 30 分钟，
+// 反代 60s 超时即断、手机切后台即无响应、无法取消。后台 goroutine 用
+// context.WithoutCancel 派生，保证客户端断开不影响执行（与原同步路径一致）。
+func (s *Service) StartTask(ctx context.Context, taskID int64) (*JobView, error) {
+	t, err := s.st.GetTask(ctx, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if t.Status == "paused" {
+		return nil, domain.Errorf(domain.CodeValidation, "任务已暂停，请先启用")
+	}
+
+	// 先占位再启动：否则两次快速点击会都通过检查。
+	js := s.jobs.create(t.ID, t.TaskName, "manual")
+
+	// 用 appCtx 而不是请求 ctx：请求在提交后可能立刻返回，而转存必须继续。
+	// 超时仍由 RunTask 内部的 runTimeout 控制。
+	// 挂上进度接收者：执行器各阶段会通过它更新 Stage/Progress。
+	jobCtx, cancel := context.WithCancel(s.appCtx)
+	js.cancel = cancel
+	jobCtx = WithProgressSink(jobCtx, js)
+
+	go func() {
+		defer cancel()
+		res, err := s.RunTask(jobCtx, taskID, "manual")
+		if err != nil {
+			js.finish(friendlyJobErr(err), nil, friendlyRunErr(err))
+			return
+		}
+		js.finish(res.Status, res, "")
+	}()
+
+	v := jobView(js)
+	return &v, nil
+}
+
+// friendlyJobErr 把 context 取消转成明确的 canceled 状态，
+// 其余错误统一记为 failed（具体原因保留在 Err 里）。
+func friendlyJobErr(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "failed"
+	default:
+		return "failed"
+	}
+}
+
+// GetJob 返回指定 job 的视图（含日志快照）。
+func (s *Service) GetJob(id int64) (*JobView, bool) {
+	js, ok := s.jobs.get(id)
+	if !ok {
+		return nil, false
+	}
+	v := jobView(js)
+	return &v, true
+}
+
+// ListJobs 返回全部 job（新的在前）。
+func (s *Service) ListJobs() []JobView {
+	list := s.jobs.list()
+	out := make([]JobView, 0, len(list))
+	for _, js := range list {
+		out = append(out, jobView(js))
+	}
+	return out
+}
+
+// CancelJob 请求取消一个正在运行的 job。
+func (s *Service) CancelJob(id int64) error {
+	js, ok := s.jobs.get(id)
+	if !ok {
+		return domain.Errorf(domain.CodeNotFound, "运行句柄不存在或已过期")
+	}
+	if js.Status != "running" {
+		return domain.Errorf(domain.CodeValidation, "该运行已结束，无法取消")
+	}
+	if js.cancel == nil {
+		return domain.Errorf(domain.CodeValidation, "该运行不支持取消")
+	}
+	js.cancel()
+	return nil
+}
+
+// RemoveJob 删除一个已结束的 job 句柄（内存态，不影响 task_runs 里的权威记录）。
+func (s *Service) RemoveJob(id int64) {
+	s.jobs.remove(id)
+}
+
+// jobView 生成 job 视图（含日志快照）。返回无锁的 JobView，可安全序列化。
+func jobView(js *JobState) JobView { return snapshotLog(js) }
+
 // RunResult 一次任务执行的结果汇总。
 type RunResult struct {
 	TaskID        int64  `json:"task_id"`
@@ -574,6 +680,14 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger string) (*R
 			trees = append(trees, tree)
 		}
 		_ = s.st.FinishRun(ctx, runID, status, msg, tree, runLog, len(names))
+
+		// 异步路径：每条链接跑完都把日志快照写进 job，前端轮询即可看到滚动输出。
+		if js := progressJobFrom(ctx); js != nil {
+			js.appendLog(runLog)
+			if len(links) > 1 {
+				js.setStage(fmt.Sprintf("第 %d/%d 条链接%s", i+1, len(links), statusText(status)), i*100/len(links))
+			}
+		}
 	}
 
 	// 汇总任务状态
@@ -668,6 +782,10 @@ func (s *Service) runOneLink(ctx context.Context, t *domain.DramaTask, link stri
 			return err
 		}
 		ex.ExtraSkipNames = skip
+		// 阶段/进度回调：仅当日志快照对应一个 job 时生效（异步路径）。
+		if sink := progressSinkFrom(ctx); sink != nil {
+			ex.onProgress = sink
+		}
 		tree, err = ex.Execute(ctx)
 		// 无论成败都取日志，排障时能看到卡在哪一步
 		runLog = truncateRunLog(ex.Log())

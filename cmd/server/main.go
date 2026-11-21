@@ -238,7 +238,10 @@ func main() {
 			if p == "" {
 				p = "index.html"
 			}
-			if _, err := fs.Stat(static, p); err != nil && !strings.HasPrefix(r.URL.Path, "/api/") {
+			// /api/ 与 /metrics 是后端路由，不能回退到 index.html
+			// （否则 Prometheus 抓 /metrics 会拿到 200 + HTML 文本，看起来"成功"但全是垃圾）。
+			if _, err := fs.Stat(static, p); err != nil &&
+				!strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/metrics" {
 				r.URL.Path = "/"
 			}
 			switch {
@@ -249,9 +252,10 @@ func main() {
 			}
 			fileServer.ServeHTTP(w, r)
 		})
-		// /api 仍走 API 路由
+		// /api 与 /metrics 走 API 路由（含鉴权与指标中间件）
 		mux := http.NewServeMux()
 		mux.Handle("/api/", srv.Handler())
+		mux.Handle("/metrics", srv.Handler())
 		mux.Handle("/", root)
 		root = mux
 	}

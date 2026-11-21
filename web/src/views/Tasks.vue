@@ -3,6 +3,7 @@
 import { ref, inject, onMounted, computed } from 'vue'
 import TaskEdit from '../components/TaskEdit.vue'
 import TaskRuns from '../components/TaskRuns.vue'
+import TaskProgress from '../components/TaskProgress.vue'
 import { taskApi, accountApi, categoryApi, fmtTime } from '../api'
 import { cronToText } from '../cron'
 
@@ -16,6 +17,10 @@ const loading = ref(true)
 const editRef = ref(null)
 const runsRef = ref(null)
 const runningIds = ref(new Set())
+
+// 当前正在展示进度的 job（同一时间只跟一个，避免多路轮询互相干扰）。
+const activeJobId = ref(0)
+const activeJobTaskId = ref(0)
 
 // 筛选条件
 const keyword = ref('')
@@ -83,21 +88,45 @@ function resetFilters() {
   filterDriver.value = ''
 }
 
+// 运行任务：后端现在是异步的（立即返回 job_id），
+// 因此这里不再 await 30 分钟，而是把 job 句柄交给 TaskProgress 轮询。
 async function runTask(t) {
   runningIds.value.add(t.id)
   runningIds.value = new Set(runningIds.value)
-  toast(`正在运行「${t.task_name}」…`)
   try {
     const res = await taskApi.run(t.id)
-    const cls = res.status === 'success' ? 'success' : res.status === 'failed' ? 'error' : 'info'
-    toast(`「${t.task_name}」${res.message}`, cls, 6000)
-    await reload()
+    if (res && res.job_id) {
+      activeJobId.value = res.job_id
+      activeJobTaskId.value = t.id
+      toast(`「${t.task_name}」已开始运行`, 'info')
+    } else {
+      // 兼容旧后端：直接返回了最终结果。
+      const cls = res.status === 'success' ? 'success' : res.status === 'failed' ? 'error' : 'info'
+      toast(`「${t.task_name}」${res.message}`, cls, 6000)
+      await reload()
+    }
   } catch (e) {
     toast(e.message, 'error')
   } finally {
     runningIds.value.delete(t.id)
     runningIds.value = new Set(runningIds.value)
   }
+}
+
+// job 结束后刷新任务列表与记录，让"上次运行状态"更新到卡片上。
+async function onJobFinished(job) {
+  const t = tasks.value.find(x => x.id === job.task_id)
+  const name = t?.task_name || job.task_name || ''
+  if (job.status === 'success') {
+    toast(`「${name}」转存完成`, 'success', 5000)
+  } else if (job.status === 'partial') {
+    toast(`「${name}」部分成功`, 'info', 6000)
+  } else if (job.status === 'canceled') {
+    toast(`「${name}」已取消`, 'info')
+  } else {
+    toast(`「${name}」运行失败：${job.error || job.result?.message || ''}`, 'error', 8000)
+  }
+  await reload()
 }
 
 async function toggleStatus(t) {
@@ -309,5 +338,9 @@ const statusBadge = (t) => {
 
     <TaskEdit ref="editRef" @saved="reload" />
     <TaskRuns ref="runsRef" />
+
+    <!-- 实时进度：异步运行后不必再刷新页面猜进度 -->
+    <TaskProgress v-if="activeJobId" :key="activeJobId" :job-id="activeJobId"
+      @finished="onJobFinished" @closed="activeJobId = 0; activeJobTaskId = 0" />
   </div>
 </template>

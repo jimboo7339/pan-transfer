@@ -21,18 +21,36 @@ func forceCloseIdle(s *Store) {
 	s.db.SetConnMaxLifetime(time.Nanosecond)
 }
 
+// openTestStore 打开一个测试库，并保证在测试结束时彻底释放文件句柄。
+//
+// Windows 上 sql.DB.Close() 不会立刻释放底层句柄，导致 t.TempDir() 的
+// RemoveAll 报"目录非空"（测试本身已通过，只是清理失败）。
+// SetMaxIdleConns(0) + 极短 ConnMaxLifetime 会让句柄在 Close 前就被回收。
+func openTestStore(t *testing.T) (*Store, string) {
+	t.Helper()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "pantransfer.db")
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() {
+		if db := s.DB(); db != nil {
+			db.SetMaxIdleConns(0)
+			db.SetConnMaxLifetime(time.Nanosecond)
+		}
+		_ = s.Close()
+	})
+	return s, dir
+}
+
 // TestBackupAndRestore 验证 VACUUM INTO 备份 + 还原的全流程。
 //
 // 这是关键路径：容器镜像里没有 sqlite3，用户唯一的备份手段就是产品内置的这个。
 // 备份必须包含 WAL 里尚未 checkpoint 的事务，否则用户拿到的是残缺数据。
 func TestBackupAndRestore(t *testing.T) {
-	dir := t.TempDir()
+	s, dir := openTestStore(t)
 	dbPath := filepath.Join(dir, "pantransfer.db")
-
-	s, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
 	ctx := context.Background()
 
 	// 写入一个账号，然后**不关闭**直接备份：WAL 里应该还有未合并的数据。
@@ -90,7 +108,13 @@ func TestBackupAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen after restore: %v", err)
 	}
-	defer s2.Close()
+	t.Cleanup(func() {
+		if db := s2.DB(); db != nil {
+			db.SetMaxIdleConns(0)
+			db.SetConnMaxLifetime(time.Nanosecond)
+		}
+		_ = s2.Close()
+	})
 
 	got, err := s2.GetAccount(ctx, id)
 	if err != nil {
@@ -103,13 +127,7 @@ func TestBackupAndRestore(t *testing.T) {
 
 // TestBackupRotation 验证只保留最近 N 份备份。
 func TestBackupRotation(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "pantransfer.db")
-	s, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer s.Close()
+	s, dir := openTestStore(t)
 
 	backupDir := filepath.Join(dir, BackupDirName)
 	ctx := context.Background()
@@ -145,13 +163,7 @@ func TestBackupRotation(t *testing.T) {
 
 // TestListBackupsIgnoresForeignFiles 验证备份目录里的无关文件不会被当成备份。
 func TestListBackupsIgnoresForeignFiles(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "pantransfer.db")
-	s, err := Open(dbPath)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer s.Close()
+	_, dir := openTestStore(t)
 
 	backupDir := filepath.Join(dir, BackupDirName)
 	if err := os.MkdirAll(backupDir, 0o700); err != nil {
@@ -172,7 +184,6 @@ func TestListBackupsIgnoresForeignFiles(t *testing.T) {
 	if len(list) != 0 {
 		t.Errorf("非备份文件应被忽略，实际列出 %d 项", len(list))
 	}
-	forceCloseIdle(s)
 }
 
 // TestMarkInterruptedRuns 验证进程崩溃留下的 running 记录会被收尾。
@@ -180,12 +191,7 @@ func TestListBackupsIgnoresForeignFiles(t *testing.T) {
 // 不修这个问题，"运行日志"里会永远留着一批转圈的任务，
 // 用户无法判断"到底跑没跑完"。
 func TestMarkInterruptedRuns(t *testing.T) {
-	dir := t.TempDir()
-	s, err := Open(filepath.Join(dir, "pantransfer.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer s.Close()
+	s, _ := openTestStore(t)
 	ctx := context.Background()
 
 	now := nowStr()
@@ -232,12 +238,7 @@ func TestMarkInterruptedRuns(t *testing.T) {
 // TestCountTasksByAccount 验证账号引用检查（删账号前必须知道有多少任务依赖它）。
 // 全仓没有生效的外键，不检查就会留下悬空 account_id 的僵尸任务。
 func TestCountTasksByAccount(t *testing.T) {
-	dir := t.TempDir()
-	s, err := Open(filepath.Join(dir, "pantransfer.db"))
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer s.Close()
+	s, _ := openTestStore(t)
 	ctx := context.Background()
 
 	n, err := s.CountTasksByAccount(ctx, 42)

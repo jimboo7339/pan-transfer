@@ -78,11 +78,20 @@ export const taskApi = {
   update: (id, d) => api.put(`/api/tasks/${id}`, d),
   remove: (id) => api.del(`/api/tasks/${id}`),
   setStatus: (id, status) => api.post(`/api/tasks/${id}/status`, { status }),
+  // 异步启动：返回 { job_id, status: 'running', stage, ... }
   run: (id) => api.post(`/api/tasks/${id}/run`),
   runs: (id, limit = 10) => api.get(`/api/tasks/${id}/runs?limit=${limit}`),
   savedNames: (id, limit = 300) => api.get(`/api/tasks/${id}/saved-names?limit=${limit}`),
   savedCount: (id) => api.get(`/api/tasks/${id}/saved-names/count`),
   clearSavedNames: (id) => api.del(`/api/tasks/${id}/saved-names`),
+}
+
+// 异步运行句柄：轮询进度与实时日志，替代"同步等 30 分钟"。
+export const jobApi = {
+  list: () => api.get('/api/jobs'),
+  get: (id) => api.get(`/api/jobs/${id}`),
+  cancel: (id) => api.post(`/api/jobs/${id}/cancel`),
+  remove: (id) => api.del(`/api/jobs/${id}`),
 }
 
 export const categoryApi = {

@@ -81,17 +81,44 @@ type Server struct {
 
 	// logins 对登录尝试做限流，防止短口令被暴力破解。
 	logins *loginLimiter
+
+	// metrics 是进程内指标，由 Handler() 中间件填充、/metrics 暴露。
+	metrics *metrics
+
+	// handlerOnce 保证 Handler() 只装配一次。
+	// 不这样做的话，每次调用 Handler() 都会重复注册 /metrics 并 panic
+	// （测试中每个请求都会调 Handler()，生产里 main 也会调一次）。
+	handlerOnce sync.Once
+	handler     http.Handler
 }
 
 // NewServer 构造 API 服务（含路由注册）。
 func NewServer(deps Deps) *Server {
-	s := &Server{deps: deps, mux: http.NewServeMux(), logins: newLoginLimiter()}
+	s := &Server{deps: deps, mux: http.NewServeMux(), logins: newLoginLimiter(), metrics: newMetrics()}
 	s.routes()
+	// /metrics 不需要鉴权（只暴露计数与耗时，不含业务数据或路径参数），
+	// 与 /api/health 一样放在 wrap 之外。在这里注册而非 Handler()，
+	// 使 Handler() 可以被重复调用而无需额外同步。
+	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	return s
 }
 
-// Handler 返回根 Handler（含静态资源）。
-func (s *Server) Handler() http.Handler { return s.mux }
+// Handler 返回根 Handler。
+//
+// 包一层指标中间件：成功请求此前完全没有日志，也无法回答
+// "这个慢请求是谁发的""哪个账号在持续限流"。
+func (s *Server) Handler() http.Handler {
+	s.handlerOnce.Do(func() {
+		s.handler = httpInstrumentation(s.mux, s.metrics, s.deps.Log)
+	})
+	return s.handler
+}
+
+// handleMetrics 以 Prometheus 文本格式输出指标。
+func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = w.Write([]byte(s.metrics.render()))
+}
 
 func (s *Server) routes() {
 	m := s.mux
@@ -130,6 +157,12 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/tasks/{id}/saved-names", s.wrap(s.handleTaskSavedNames))
 	m.HandleFunc("GET /api/tasks/{id}/saved-names/count", s.wrap(s.handleTaskSavedCount))
 	m.HandleFunc("DELETE /api/tasks/{id}/saved-names", s.wrap(s.handleTaskSavedClear))
+
+	// 异步运行句柄（进度 / 取消）
+	m.HandleFunc("GET /api/jobs", s.wrap(s.handleJobList))
+	m.HandleFunc("GET /api/jobs/{id}", s.wrap(s.handleJobGet))
+	m.HandleFunc("POST /api/jobs/{id}/cancel", s.wrap(s.handleJobCancel))
+	m.HandleFunc("DELETE /api/jobs/{id}", s.wrap(s.handleJobDelete))
 
 	// 命名正则规则
 	m.HandleFunc("GET /api/rules", s.wrap(s.handleRuleList))
@@ -184,8 +217,12 @@ func (s *Server) handleHealthReady(w http.ResponseWriter, r *http.Request) {
 		details["running_tasks"] = fmt.Sprintf("%d", len(stats.RunningTaskIDs))
 		if stats.LastSweepAt != "" {
 			details["last_sweep_at"] = stats.LastSweepAt
+		} else {
+			// 尚未完成第一次扫描（启动后 30 秒内）。这是正常状态，
+			// 不能报成 disabled —— 否则用户会以为调度被关了。
+			details["last_sweep_at"] = "等待首次扫描（启动后 30 秒内）"
 		}
-		if !stats.SchedulingEnabled {
+		if stats.SweepsCompleted && !stats.SchedulingEnabled {
 			// 调度被用户显式关闭，不是故障，但要如实反映。
 			checks["scheduler"] = "disabled"
 		}
@@ -269,18 +306,30 @@ func writeErr(w http.ResponseWriter, err error) {
 	}})
 }
 
-// wrap 统一鉴权 + 错误处理。handler 返回错误时写 JSON 错误响应。
+// wrap 统一鉴权 + 错误处理 + 错误计数。handler 返回错误时写 JSON 错误响应。
 func (s *Server) wrap(fn func(w http.ResponseWriter, r *http.Request) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := s.checkAuth(r); err != nil {
+			s.countAPIError(err)
 			writeErr(w, err)
 			return
 		}
 		if err := fn(w, r); err != nil {
 			s.deps.Log.Warn("API 错误", "path", r.URL.Path, "err", err)
+			s.countAPIError(err)
 			writeErr(w, err)
 		}
 	}
+}
+
+// countAPIError 按错误码累加指标，便于定位"哪个错误在涨"。
+func (s *Server) countAPIError(err error) {
+	var ae *domain.AppError
+	if errors.As(err, &ae) {
+		s.metrics.incError(string(ae.Code))
+		return
+	}
+	s.metrics.incError(string(domain.CodeInternal))
 }
 
 type stdBody struct {
@@ -848,6 +897,65 @@ func taskOut(t *domain.DramaTask) map[string]any {
 	}
 }
 
+// ---------- 异步运行句柄 ----------
+
+// handleJobList 列出运行中的（及最近结束的）job。
+func (s *Server) handleJobList(w http.ResponseWriter, r *http.Request) error {
+	list := s.deps.Transfer.ListJobs()
+	running := 0
+	for _, j := range list {
+		if j.Status == "running" {
+			running++
+		}
+	}
+	respond(w, map[string]any{
+		"jobs":    list,
+		"running": running,
+	})
+	return nil
+}
+
+// handleJobGet 返回单个 job 的进度与日志快照。
+func (s *Server) handleJobGet(w http.ResponseWriter, r *http.Request) error {
+	id, err := pathID(r)
+	if err != nil {
+		return err
+	}
+	job, ok := s.deps.Transfer.GetJob(id)
+	if !ok {
+		return domain.Errorf(domain.CodeNotFound, "运行句柄不存在或已过期（句柄是内存态，重启即清空）")
+	}
+	respond(w, job)
+	return nil
+}
+
+// handleJobCancel 请求取消一个运行中的 job。
+//
+// 注意：取消只是设置 context 取消标记，当前正在进行的单次网盘请求可能仍会
+// 完成（驱动层没有逐请求的中断传播）；已完成的转存不会回滚。
+func (s *Server) handleJobCancel(w http.ResponseWriter, r *http.Request) error {
+	id, err := pathID(r)
+	if err != nil {
+		return err
+	}
+	if err := s.deps.Transfer.CancelJob(id); err != nil {
+		return err
+	}
+	respond(w, map[string]any{"ok": true, "message": "已请求取消；当前进行中的单次请求会自然结束"})
+	return nil
+}
+
+// handleJobDelete 删除一个已结束的 job 句柄（不影响 task_runs 里的权威记录）。
+func (s *Server) handleJobDelete(w http.ResponseWriter, r *http.Request) error {
+	id, err := pathID(r)
+	if err != nil {
+		return err
+	}
+	s.deps.Transfer.RemoveJob(id)
+	respond(w, map[string]bool{"ok": true})
+	return nil
+}
+
 func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) error {
 	list, err := s.deps.Transfer.ListTasks(r.Context())
 	if err != nil {
@@ -921,18 +1029,35 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) error 
 	return nil
 }
 
+// handleTaskRun 启动一次任务执行（异步）。
+//
+// 为什么改成异步：同步路径下整个转存流程（多链接 × 每批 100 文件 × 逐文件重命名）
+// 在 HTTP 请求里跑完，最长 30 分钟。后果是反代 60s 超时即断、手机切后台即
+// 无响应、页面关掉再也看不到结果、无法取消。
+//
+// 语义变化（破坏性，但有兼容）：
+//   - 响应从 {task_id, status, transfer_count, ...} 变为 {job_id, status: "running", ...}；
+//   - 需要进度/结果时轮询 GET /api/jobs/{id} 或 GET /api/jobs。
+//   - 兼容：仍在响应里带上 running: true，老前端至少不会误判"运行失败"。
 func (s *Server) handleTaskRun(w http.ResponseWriter, r *http.Request) error {
 	id, err := pathID(r)
 	if err != nil {
 		return err
 	}
-	// 脱离请求上下文：客户端刷新/断开/反代超时不应中断正在进行的转存
-	ctx := context.WithoutCancel(r.Context())
-	res, err := s.deps.Transfer.RunTaskNow(ctx, id)
+	job, err := s.deps.Transfer.StartTask(r.Context(), id)
 	if err != nil {
 		return err
 	}
-	respond(w, res)
+	respond(w, map[string]any{
+		"job_id":      job.ID,
+		"task_id":     job.TaskID,
+		"task_name":   job.TaskName,
+		"status":      "running",
+		"running":     true,
+		"stage":       job.Stage,
+		"started_at":  job.StartedAt,
+		"poll_hint":   "轮询 GET /api/jobs/" + fmt.Sprintf("%d", job.ID) + " 获取进度与日志",
+	})
 	return nil
 }
 

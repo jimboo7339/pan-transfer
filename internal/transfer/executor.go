@@ -65,6 +65,9 @@ type DramaExecutor struct {
 	transferCount  int
 	transferNames  []string // 本次转存+重命名后的目标文件名列表，供通知格式化使用（来自Trae）
 	ExtraSkipNames []string // 转存历史中的已保存文件名：与目标目录列表一并参与去重（来自Trae）
+
+	// onProgress 可选：阶段/进度回调，供异步任务句柄更新 UI。
+	onProgress func(stage string, progress int)
 }
 
 // NewDramaExecutor 构造执行器；drv 必须实现 ShareTransferer（来自Trae）。
@@ -111,10 +114,22 @@ func (e *DramaExecutor) line(text string) {
 	e.log.WriteByte('\n')
 }
 
+// progress 报告当前阶段与粗略进度（供异步任务句柄展示）。
+//
+// 为什么不是 channel 推流：执行器内部是 strings.Builder，把它改成 channel 架构
+// 会牵动全部 8 个阶段；而用户只需要"现在在哪一步、大概到几成"。
+// 轮询日志尾部已经能满足，这里只额外给一个可判读的百分比。
+func (e *DramaExecutor) progress(stage string, pct int) {
+	if e.onProgress != nil {
+		e.onProgress(stage, pct)
+	}
+}
+
 func (e *DramaExecutor) section(title string) {
 	e.log.WriteString("\n=== ")
 	e.log.WriteString(title)
 	e.log.WriteString(" ===\n")
+	e.progress(title, -1)
 }
 
 // Execute 运行完整转存流程，返回树状摘要（来自Trae）
@@ -199,6 +214,9 @@ func (e *DramaExecutor) Execute(ctx context.Context) (string, error) {
 	}
 	plan := e.planTransfer(rootFiles, destFileNames)
 	e.line(fmt.Sprintf("待转存文件数: %d", len(plan)))
+	// 前五步（解析→token→目录→列表→计划）占 0–30%，转存占 30–80%，重命名 80–92%，
+	// 子目录 92–98%，收尾 100%。粗粒度但足以让用户判断"是卡在解析还是卡在批量转存"。
+	e.progress("生成转存计划", 30)
 
 	// 7. 执行转存（来自Trae）
 	if len(plan) > 0 {
@@ -221,6 +239,7 @@ func (e *DramaExecutor) Execute(ctx context.Context) (string, error) {
 			e.transferNames = append(e.transferNames, plan[i].targetName)
 		}
 	}
+	e.progress("收尾", 96)
 
 	// 9. 子目录同步（来自Trae）
 	if strings.TrimSpace(e.task.UpdateSubdir) != "" {
@@ -230,6 +249,7 @@ func (e *DramaExecutor) Execute(ctx context.Context) (string, error) {
 		driver.InvalidateDirCache(ctx, e.task.AccountID, destFID)
 	}
 
+	e.progress("已完成", 100)
 	return tree.String(), nil
 }
 

@@ -27,6 +27,11 @@
   0 新文件的空跑静默，不刷屏
 - **运行日志**：保留最近运行记录，含**完整执行日志**（解析→token→目录→计划→转存→重命名）；
   可配置保留天数（默认 90 天，每任务保底 50 条）
+- **实时进度**：「运行」按钮立即返回，卡片内显示阶段（解析分享链接 / 转存中 / 重命名）、
+  进度条与滚动日志，**随时可取消**；关掉页面再回来也能继续跟（服务端保留句柄）
+- **可观测性**：`GET /metrics` 以 Prometheus 文本格式暴露请求量、错误码分布、耗时直方图、
+  调度扫描次数、上游限流次数，可直接接入 Grafana；`GET /api/health/ready` 逐项探测
+  数据库与调度器（不只是「进程活着」）
 - **账号管理**：夸克 Cookie / 光鸭 Token 两种凭据，**扫码登录**自动获取，驱动刷新后自动回写，
   一键测试连通性；账号可启用/停用（停用后不被调度）
 - **凭据安全**：账号 cookie / token 以 **AES-256-GCM 加密落库**（主密钥来自
@@ -64,7 +69,8 @@
 网络层保护：**每账号请求间隔 300ms**（可在设置里调整；逐文件遍历是平台风控的主因）；
 限流（光鸭 127/429/354、夸克 429 与业务限流码）指数退避重试 3 次；
 目录与分享列表 30s 缓存（自己的写入立即失效）；单次运行总超时 30 分钟；
-手动运行脱离 HTTP 请求上下文（刷新页面、断网都不中断）。
+手动运行**异步执行**（HTTP 请求立即返回 `job_id`，进度通过 `GET /api/jobs/{id}` 查询），
+刷新页面、断网、反代超时都不中断。
 
 ## 升级须知（凭据加密）
 
@@ -186,6 +192,20 @@ internal/
   httpapi/     REST API + 会话鉴权（含 CSRF 防护）+ 备份接口 + 深度健康检查
 web/                 Vue3 前端（构建产物 embed 进二进制）
 ```
+
+## API 速览
+
+| 分组 | 端点 |
+|---|---|
+| 认证 | `POST /api/auth/login` · `POST /api/auth/logout` · `GET /api/auth/status` |
+| 账号 | `GET/POST /api/accounts` · `PUT/DELETE /api/accounts/{id}` · `POST /api/accounts/{id}/probe` · `GET /api/accounts/{id}/profile` · `POST /api/accounts/qr/{start,poll}` |
+| 任务 | `GET/POST /api/tasks` · `PUT/DELETE /api/tasks/{id}` · `POST /api/tasks/{id}/status` · `POST /api/tasks/{id}/run`（异步） · `GET /api/tasks/{id}/runs` · `GET/DELETE /api/tasks/{id}/saved-names` |
+| 运行句柄 | `GET /api/jobs` · `GET /api/jobs/{id}` · `POST /api/jobs/{id}/cancel` · `DELETE /api/jobs/{id}` |
+| 分类回调 | `GET/POST /api/categories` · `DELETE /api/categories/{id}` · `POST /api/categories/{id}/test` · `GET /api/categories/{id}/callback-logs` |
+| 命名规则 | `GET/POST /api/rules` · `DELETE /api/rules/{key}` · `POST /api/rules/test` |
+| 预览/浏览 | `POST /api/share/preview` · `GET /api/files/{list,resolve}` · `POST /api/files/mkdir` |
+| 备份 | `GET/POST /api/backup` · `GET /api/backup/download` · `POST /api/restore` |
+| 运维 | `GET /api/health` · `GET /api/health/ready` · `GET /metrics` |
 
 ## 声明
 

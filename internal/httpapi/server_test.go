@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"pan-transfer/internal/accounts"
 	"pan-transfer/internal/notify"
@@ -62,6 +63,10 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 }
 
 // forceClose 尽力关闭底层连接，避免 Windows 上 TempDir 清理失败。
+//
+// sql.DB.Close() 在 Windows 上不会立刻释放文件句柄，导致 t.TempDir() 的
+// RemoveAll 报"目录非空"（测试本身已通过，只是清理报错）。
+// SetMaxIdleConns(0) 会丢弃空闲连接，配合 SetConnMaxLifetime 让句柄立即释放。
 func forceClose(s *Server) {
 	if s == nil {
 		return
@@ -69,6 +74,7 @@ func forceClose(s *Server) {
 	if st := s.currentStore(); st != nil {
 		if db := st.DB(); db != nil {
 			db.SetMaxIdleConns(0)
+			db.SetConnMaxLifetime(time.Nanosecond)
 		}
 	}
 }
