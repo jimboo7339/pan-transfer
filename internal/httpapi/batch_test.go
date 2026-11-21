@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -29,6 +30,28 @@ func seedTestTask(t *testing.T, st *store.Store, name string) int64 {
 		t.Fatalf("create task: %v", err)
 	}
 	return id
+}
+
+// testAccount 构造一个测试账号。
+func testAccount(name, config string) *store.Account {
+	return &store.Account{
+		Name: name, DriverType: "quark", Config: config, IsActive: true,
+	}
+}
+
+// decodeData 从响应体中解出 data 字段。
+//
+// 注意信封：respond() 的响应是 {"ok":true,"data":{...}}，
+// 直接 Unmarshal 到目标结构会拿到零值。
+func decodeData[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
+	t.Helper()
+	var env struct {
+		Data T `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("解析响应失败: %v (body=%s)", err, rec.Body.String())
+	}
+	return env.Data
 }
 
 // TestBatchPauseAndResume 验证批量暂停与恢复。

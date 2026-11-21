@@ -652,6 +652,109 @@ func (s *Store) PruneRuns(ctx context.Context, keepDays, keepPerTask int) (int64
 	return res.RowsAffected()
 }
 
+// DailyTransferCount 是一天的转存统计（仪表盘用）。
+type DailyTransferCount struct {
+	Date  string `json:"date"`  // YYYY-MM-DD
+	Count int    `json:"count"` // 当天转存文件数
+	Runs  int    `json:"runs"`  // 当天运行次数
+}
+
+// TransferStats 返回最近 N 天的转存统计（按天聚合）。
+//
+// 为什么在 SQL 里聚合而不是把 task_runs 全捞到内存：运行记录可能上万条
+// （单条最大 256KB 的日志），全捞到内存再算既慢又浪费。
+//
+// 注意：started_at 存的是 RFC3339（带时区偏移，如 2026-11-21T14:30:00+08:00）。
+// 直接和 date('now') 这种纯日期字符串比较，会走字符串字典序而非时间序，
+// 跨时区时结果不稳定。所以这里统一用 date(started_at) 取日期部分来分组，
+// 并在应用层补齐缺失的日期。
+func (s *Store) TransferStats(ctx context.Context, days int) ([]DailyTransferCount, error) {
+	if days <= 0 {
+		days = 7
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT date(started_at) AS d,
+		       COALESCE(SUM(transfer_count), 0) AS c,
+		       COUNT(*) AS r
+		FROM task_runs
+		WHERE started_at != ''
+		GROUP BY d
+		ORDER BY d DESC
+		LIMIT ?`, days*3)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	byDate := map[string]DailyTransferCount{}
+	for rows.Next() {
+		var d DailyTransferCount
+		if err := rows.Scan(&d.Date, &d.Count, &d.Runs); err != nil {
+			return nil, err
+		}
+		byDate[d.Date] = d
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// 补齐缺失的日期（前端画趋势条需要连续 N 个点，
+	// 缺的天补 0，否则图会错位）。
+	out := make([]DailyTransferCount, 0, days)
+	today := time.Now()
+	for i := days - 1; i >= 0; i-- {
+		day := today.AddDate(0, 0, -i).Format("2006-01-02")
+		if v, ok := byDate[day]; ok {
+			out = append(out, v)
+		} else {
+			out = append(out, DailyTransferCount{Date: day})
+		}
+	}
+	return out, nil
+}
+
+// RecentFailures 返回最近失败的运行记录（仪表盘告警用）。
+func (s *Store) RecentFailures(ctx context.Context, limit int) ([]*TaskRun, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, task_id, status, message, tree_summary, log, transfer_count, link, started_at, finished_at
+		FROM task_runs
+		WHERE status = 'failed'
+		ORDER BY id DESC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*TaskRun
+	for rows.Next() {
+		var r TaskRun
+		var started, finished string
+		if err := rows.Scan(&r.ID, &r.TaskID, &r.Status, &r.Message, &r.TreeSummary,
+			&r.Log, &r.TransferCount, &r.Link, &started, &finished); err != nil {
+			return nil, err
+		}
+		r.StartedAt, _ = time.Parse(time.RFC3339, started)
+		r.FinishedAt, _ = time.Parse(time.RFC3339, finished)
+		out = append(out, &r)
+	}
+	return out, rows.Err()
+}
+
+// CountAllSavedNames 返回全部转存历史条数（仪表盘用）。
+//
+// 这个数字有意义：saved_names 是唯一无界增长的表（去重依据，不能随意清理），
+// 用户在设置页看到"累计转存 12345 个文件"时能直观感受到规模，
+// 也能在数字异常暴涨时察觉"是不是在重复转存"。
+func (s *Store) CountAllSavedNames(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM saved_names`).Scan(&n)
+	return n, err
+}
+
 // SavedNormNames 返回任务全部已保存的规范化文件名（去重跳过用）。
 func (s *Store) SavedNormNames(ctx context.Context, taskID int64) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT norm_name FROM saved_names WHERE task_id=?`, taskID)

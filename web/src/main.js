@@ -2,22 +2,26 @@ import { createApp, ref } from 'vue'
 import { createRouter, createWebHashHistory } from 'vue-router'
 import { initTheme } from './theme'
 import App from './App.vue'
-import Tasks from './views/Tasks.vue'
-import Logs from './views/Logs.vue'
-import Accounts from './views/Accounts.vue'
-import Rules from './views/Rules.vue'
-import Settings from './views/Settings.vue'
 import { authApi, setToken, setUnauthorizedHandler } from './api'
 import './style.css'
 
+// 路由懒加载：所有视图用 () => import() 而不是静态 import。
+//
+// 为什么：此前 main.js 静态 import 了 5 个视图，导致首屏要下载全部业务代码
+// （gzip 后 ~74KB）。改成懒加载后，首屏只需要 Dashboard 一个 chunk，
+// 其余页面在用户点击时才加载。
+//
+// 仪表盘作为默认路由：打开面板的第一诉求是「系统健康吗」，
+// 而不是「有哪些任务」（任务列表需要用户先有任务才有意义）。
 const router = createRouter({
   history: createWebHashHistory(),
   routes: [
-    { path: '/', component: Tasks },
-    { path: '/logs', component: Logs },
-    { path: '/accounts', component: Accounts },
-    { path: '/rules', component: Rules },
-    { path: '/settings', component: Settings },
+    { path: '/', component: () => import('./views/Dashboard.vue') },
+    { path: '/tasks', component: () => import('./views/Tasks.vue') },
+    { path: '/logs', component: () => import('./views/Logs.vue') },
+    { path: '/accounts', component: () => import('./views/Accounts.vue') },
+    { path: '/rules', component: () => import('./views/Rules.vue') },
+    { path: '/settings', component: () => import('./views/Settings.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 })

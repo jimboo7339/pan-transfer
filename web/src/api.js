@@ -130,6 +130,13 @@ export const settingsApi = {
   save: (d) => api.put('/api/settings', d),
 }
 
+// 仪表盘：一次请求聚合"系统健康吗"所需的全部信息。
+// 为什么不是让前端发 6 个请求自己拼：首屏并发请求会在 SQLite 单连接
+// （SetMaxOpenConns(1)）上排队，少发请求就是少排队。
+export const dashboardApi = {
+  get: () => api.get('/api/dashboard'),
+}
+
 export const backupApi = {
   list: () => api.get('/api/backup'),
   create: () => api.post('/api/backup'),

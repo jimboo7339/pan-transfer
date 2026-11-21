@@ -203,6 +203,9 @@ func (s *Server) routes() {
 	// 调度辅助
 	m.HandleFunc("GET /api/cron/next", s.wrap(s.handleCronNext))
 
+	// 仪表盘（聚合总览，一次请求回答"系统健康吗"）
+	m.HandleFunc("GET /api/dashboard", s.wrap(s.handleDashboard))
+
 	// 备份与还原
 	s.registerBackupRoutes()
 
