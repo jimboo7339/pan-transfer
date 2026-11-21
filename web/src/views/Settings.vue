@@ -2,6 +2,7 @@
 // 设置：通知渠道管理 + 全局开关 + 访问密码 + 数据备份。
 import Modal from '../components/Modal.vue'
 import WeekPicker from '../components/WeekPicker.vue'
+import ConfigTransfer from '../components/ConfigTransfer.vue'
 import { settingsApi, notifyApi, authApi, cronApi, categoryApi, backupApi, fmtTime, fmtSize, setToken } from '../api'
 import { CRON_PRESETS, cronToText } from '../cron'
 import { ref, reactive, inject, onMounted, watch, computed } from 'vue'
@@ -324,6 +325,8 @@ async function doLogout() {
 const backups = ref([])
 const backupsLoading = ref(false)
 const backingUp = ref(false)
+// 配置导入/导出弹层。
+const configRef = ref(null)
 
 async function loadBackups() {
   backupsLoading.value = true
@@ -602,8 +605,24 @@ const newestBackup = computed(() => backups.value[0] || null)
             </tbody>
           </table>
         </div>
+
+        <!-- 配置导入 / 导出：与备份是一对，但语义不同 -->
+        <div class="config-transfer-row">
+          <div>
+            <div style="font-weight: 600; font-size: 13.5px">配置迁移</div>
+            <div class="page-desc">
+              把任务、命名规则、分类回调打包成 JSON，用于换机、重装或多机同步。
+              <b>不包含凭据</b>，可安全分享；凭据请走上面的「数据备份」。
+            </div>
+          </div>
+          <span class="flex-1"></span>
+          <button class="btn" @click="configRef.open()">导入 / 导出配置</button>
+        </div>
       </div>
     </template>
+
+    <!-- 配置导入/导出 -->
+    <ConfigTransfer ref="configRef" />
 
     <!-- 渠道编辑 -->
     <Teleport to="body">

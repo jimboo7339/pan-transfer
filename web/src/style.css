@@ -484,6 +484,12 @@ html.dark .log-tree { background: #0a0e17; border-color: #2b3552; }
 /* 通知渠道卡片 */
 .channel-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
 
+/* 配置迁移行：与备份列表分开，用分隔线区分「两种不同用途」 */
+.config-transfer-row {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--border);
+}
+
 /* 周几选择 */
 .week-picker { display: flex; gap: 6px; }
 .week-day {

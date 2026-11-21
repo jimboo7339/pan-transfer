@@ -136,6 +136,14 @@ export const backupApi = {
   restore: (name) => api.post('/api/restore', { name }),
 }
 
+// 配置导入/导出：跨实例迁移任务、规则、分类（不含凭据）。
+// exportUrl 同样走原生链接（带 Content-Disposition，浏览器直接下载 JSON 文件）。
+export const configApi = {
+  exportUrl: () => '/api/config/export',
+  importPreview: (bundle) => api.post('/api/config/import/preview', bundle),
+  import: (bundle) => api.post('/api/config/import', bundle),
+}
+
 export const notifyApi = {
   test: (channel) => api.post('/api/notify/test', channel),
 }
