@@ -8,8 +8,13 @@ import { accountApi, taskApi, ruleApi, settingsApi, cronApi, categoryApi } from 
 import { CRON_PRESETS, cronToText } from '../cron'
 import WeekPicker from './WeekPicker.vue'
 import { extractShareFid, withShareFid, stripShareFid } from '../shareurl'
+import { useDraft, useDirtyGuard } from '../composables/useDraft'
 
 const toast = inject('toast')
+const confirmDialog = inject('confirmDialog')
+
+const draft = useDraft('task_edit', form)
+const { confirmDiscard } = useDirtyGuard(confirmDialog, draft.dirty)
 
 const visible = ref(false)
 const saving = ref(false)
@@ -148,7 +153,27 @@ async function open(task) {
     })
     scheduleMode.value = 'manual'
   }
+
+  // 草稿：绑定草稿监听（在表单填好之后再 start，避免把加载中的中间态存进去）。
+  //
+  // 只对「新建任务」恢复草稿：编辑已有任务时表单已经填好了库里的值，
+  // 再叠加草稿会把旧内容和草稿混在一起，反而更乱。
+  draft.start()
+  if (!task && draft.restore()) {
+    toast('已恢复上次未保存的新建任务草稿', 'info', 4500)
+  }
 }
+
+// 关闭表单：脏检查。
+//
+// 为什么需要：这个表单有 20+ 字段，关闭途径有 4 条（遮罩、✕、取消、路由切换），
+// 此前全部静默丢弃。用户填完 20 个字段被误触遮罩 → 全部重来。
+async function close() {
+  if (!(await confirmDiscard())) return
+  draft.stop()
+  visible.value = false
+}
+
 defineExpose({ open })
 
 function addLink() { form.links.push('') }
@@ -232,6 +257,9 @@ async function save() {
     if (isEdit.value) await taskApi.update(form.id, payload)
     else await taskApi.create(payload)
     toast(isEdit.value ? '任务已更新' : '任务已创建', 'success')
+    // 提交成功：清草稿。否则下次打开会看到上次的旧内容，
+    // 用户会以为"没保存上"。
+    draft.markSaved()
     visible.value = false
     emit('saved')
   } catch (e) {
@@ -244,11 +272,11 @@ async function save() {
 
 <template>
   <Teleport to="body">
-    <div v-if="visible" class="modal-overlay" @mousedown.self="visible = false">
+    <div v-if="visible" class="modal-overlay" @mousedown.self="close">
       <div class="modal modal-lg">
         <div class="modal-head">
           <div class="modal-title">{{ isEdit ? '编辑转存任务' : '新建转存任务' }}</div>
-          <button class="modal-close" @click="visible = false">✕</button>
+          <button class="modal-close" aria-label="关闭" @click="close">✕</button>
         </div>
         <div class="modal-body">
           <!-- 基础信息 -->
@@ -425,7 +453,7 @@ async function save() {
         </div>
         <div class="modal-foot">
           <span class="flex-1"></span>
-          <button class="btn" @click="visible = false">取消</button>
+          <button class="btn" @click="close">取消</button>
           <button class="btn btn-primary" :disabled="saving" @click="save">
             <span v-if="saving" class="spinner" style="border-top-color: #fff"></span>
             <span v-else>{{ isEdit ? '保存修改' : '创建任务' }}</span>
