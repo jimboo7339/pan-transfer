@@ -8,6 +8,22 @@
 > cloud-auto-save-x 1.x 开源版的 adapter 逐行对齐）；业务逻辑（追剧调度、魔法重命名、
 > 分享预览）参考 CASX v1.0.9 开源源码用 Go 重新编排。
 
+> ⚠️ **授权提示（先看这个）**
+>
+> 本项目的协议层派生自 LitePan，其上游采用
+> [PolyForm Noncommercial License 1.0.0](https://polyformproject.org/licenses/noncommercial/1.0.0)。
+> 因此 **PanTransfer 整体不是可按普通开源许可证自由使用的代码**：
+>
+> | 用途 | 是否允许 |
+> |---|---|
+> | 个人自用、学习、研究、修改 | ✅ |
+> | 分发（须附原条款与 Required Notice） | ✅ |
+> | **商业性使用** | ❌ 需向上游取得授权 |
+> | **再许可 / 转让许可** | ❌ 条款明文禁止 |
+>
+> 完整说明见 [LICENSE-NOTICE.md](LICENSE-NOTICE.md)。
+> 不要删掉上游的 Required Notice——那是条款要求，不是可选项。
+
 ## 功能
 
 - **追剧任务**：多源链接按序轮换（失效自动跳过）、三档调度（手动 / 跟随全局 / 自定义定时，
@@ -254,5 +270,10 @@ web/                 Vue3 前端（构建产物 embed 进二进制）
 
 ## 声明
 
-仅供学习与个人使用；请确保拥有对应账号与资源的合法使用权，遵守网盘服务条款。
+**授权**：本项目派生自 [LitePan](https://github.com/jimboo7339/LitePan)（PolyForm
+Noncommercial 1.0.0），整体**仅限非商业用途**；商业使用与再许可均需向上游取得授权。
+详见 [LICENSE-NOTICE.md](LICENSE-NOTICE.md)。分发时请保留上游的
+`Required Notice: Copyright Ponphil (2026)` 与 `Copyright LitePan Authors (2026)`。
+
+**使用**：请确保拥有对应网盘账号与资源的合法使用权，遵守网盘服务条款。
 使用逆向接口产生的账号与数据风险自行承担。
