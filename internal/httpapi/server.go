@@ -206,6 +206,9 @@ func (s *Server) routes() {
 	// 仪表盘（聚合总览，一次请求回答"系统健康吗"）
 	m.HandleFunc("GET /api/dashboard", s.wrap(s.handleDashboard))
 
+	// 全局搜索（跨任务/账号/规则/分类/运行记录/转存文件）
+	m.HandleFunc("GET /api/search", s.wrap(s.handleSearch))
+
 	// 备份与还原
 	s.registerBackupRoutes()
 
