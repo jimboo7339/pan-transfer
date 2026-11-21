@@ -1,8 +1,14 @@
-# 推送到 GitHub 自动构建多架构镜像并发布到 ghcr.io：
+# 推送到 GitHub 自动构建多架构镜像并发布到 ghcr.io，打 tag 时额外产出多平台二进制与 Release：
 #   - 推 main/master → ghcr.io/<owner>/<repo>:latest + sha-xxxxxxx
 #   - 推 v* tag     → ghcr.io/<owner>/<repo>:1.2.3（语义化版本）
+#                     + 跨平台二进制（linux amd64/arm64、windows、darwin）
+#                     + GitHub Release（自动生成发布说明）
 # 权限：GITHUB_TOKEN 默认具备写 packages 权限（下方 permissions 已声明）。
 # 首次发布后到 GitHub 仓库 Packages 设置里把镜像可见性设为 public，NAS 才能匿名拉取。
+#
+# 发布说明为什么自动生成而不是手写：手写会过期（忘了更新），
+# 而 git 提交历史本身就是最准确的变更记录。
+# 脚本取「上一个 tag 到当前 tag 之间」的提交，按 conventional commit 前缀分组。
 
 name: docker
 
@@ -15,6 +21,9 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # 交叉编译目标：linux amd64/arm64 覆盖 NAS 与服务器；
+  # windows/darwin 给「直接跑二进制而不是 Docker」的用户。
+  RELEASE_TARGETS: "linux/amd64 linux/arm64 windows/amd64 darwin/amd64 darwin/arm64"
 
 jobs:
   # 测试先行：后端 vet + 全量单测 + 前端构建，不过不发布镜像
@@ -84,3 +93,124 @@ jobs:
           build-args: VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # 打 tag 时额外产出跨平台二进制 + GitHub Release。
+  #
+  # 为什么需要：自托管用户里相当一部分人不用 Docker（Windows 上直接跑，
+  # 或 NAS 上看不惯容器），有个可下载的 exe 能显著降低试用门槛。
+  #
+  # 目录结构：每个目标平台一个 dist/pan-transfer-<version>-<os>-<arch>/ 目录，
+  # 里面放二进制 + README + compose，再分别打成 tar.gz 或 zip。
+  # 附带 SHA256SUMS.txt 让用户能校验下载完整性（供应链完整性的最低成本手段）。
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 创建 Release 需要写权限
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 生成发布说明要读历史提交
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: build frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: cross-compile
+        run: |
+          set -euo pipefail
+          VERSION="${{ github.ref_name }}"
+          mkdir -p dist
+          for target in $RELEASE_TARGETS; do
+            GOOS="${target%/*}"
+            GOARCH="${target#*/}"
+            out="dist/pan-transfer-${VERSION}-${GOOS}-${GOARCH}"
+            mkdir -p "$out"
+            ext=""
+            if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
+            echo "==> building $GOOS/$GOARCH"
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
+              go build -trimpath \
+                -ldflags "-s -w -X main.version=${VERSION}" \
+                -o "$out/pan-transfer${ext}" ./cmd/server
+            # 每个包附一份 README 与 compose，用户拿到就能跑
+            cp README.md "$out/" 2>/dev/null || true
+            cp docker-compose.yml "$out/" 2>/dev/null || true
+          done
+
+      - name: package archives
+        run: |
+          set -euo pipefail
+          cd dist
+          for d in pan-transfer-*; do
+            [ -d "$d" ] || continue
+            case "$d" in
+              *windows*) (cd "$d" && zip -qr "../${d}.zip" .) ;;
+              *)         tar -czf "${d}.tar.gz" "$d" ;;
+            esac
+          done
+          # 校验和：用户下载后可自行核对（供应链完整性的最低成本手段）
+          sha256sum pan-transfer-*.tar.gz pan-transfer-*.zip > SHA256SUMS.txt || true
+          ls -la
+
+      - name: generate release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          {
+            echo "## 变更"
+            echo
+            if [ -n "$PREV_TAG" ]; then
+              RANGE="${PREV_TAG}..${{ github.ref_name }}"
+            else
+              RANGE="HEAD"
+            fi
+            # 按 conventional commit 前缀分组，比一长串列表可读
+            git log --pretty=format:'%s' "$RANGE" \
+              | grep -E '^[a-zA-Z]+(\(|:)' \
+              | sed -E 's/^([a-zA-Z]+)(\([^)]*\))?:[[:space:]]*/- [\1] /' \
+              || echo "- （无提交）"
+            echo
+            echo "## 升级说明"
+            echo
+            echo '```bash'
+            echo '# Docker'
+            echo 'docker compose pull && docker compose up -d'
+            echo '```'
+            echo
+            echo '凭据与任务都在 \`data/\` 卷里，升级镜像不丢数据。'
+            echo '**备份请连 \`master.key\` 一起保存**，否则备份里的凭据无法解密。'
+            echo
+            echo '## 校验和'
+            echo
+            echo '```'
+            cat SHA256SUMS.txt 2>/dev/null || echo '(无)'
+            echo '```'
+          } > RELEASE_NOTES.md
+          head -40 RELEASE_NOTES.md
+
+      - name: create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
