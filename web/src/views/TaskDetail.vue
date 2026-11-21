@@ -100,22 +100,40 @@ async function loadAll() {
   }
 }
 
+// loadRuns 加载运行记录。
+//
+// 竞态防护：watch(runsLimit) 在用户连点「加载更多」时会并发触发，
+// 早先没有序号守卫，先发的请求后返回会把 runs 覆盖成更少的那一批，
+// 用户看到列表"变短了"。
+let runsSeq = 0
+
 async function loadRuns() {
-  if (!taskId.value) return
+  const id = taskId.value
+  if (!id) return
+  const seq = ++runsSeq
   try {
-    runs.value = (await taskApi.runs(taskId.value, runsLimit.value)) || []
+    const list = (await taskApi.runs(id, runsLimit.value)) || []
+    if (seq !== runsSeq) return
+    runs.value = list
     expanded.value = new Set()
   } catch (e) {
+    if (seq !== runsSeq) return
     toast(e.message, 'error')
   }
 }
 
 async function loadSaved() {
+  const id = taskId.value
   try {
-    saved.value = (await taskApi.savedNames(taskId.value)) || []
-    const c = await taskApi.savedCount(taskId.value)
-    savedTotal.value = c?.count ?? saved.value.length
+    const list = (await taskApi.savedNames(id)) || []
+    const c = await taskApi.savedCount(id)
+    // 两次 await 之间可能已切换任务：以第一次请求的 id 为准，
+    // 避免把 A 任务的计数写到 B 任务的界面上。
+    if (id !== taskId.value) return
+    saved.value = list
+    savedTotal.value = c?.count ?? list.length
   } catch (e) {
+    if (id !== taskId.value) return
     toast(e.message, 'error')
   }
 }

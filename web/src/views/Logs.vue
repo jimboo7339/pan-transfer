@@ -24,19 +24,32 @@ async function loadTasks() {
   }
 }
 
+// loadRuns 加载当前任务的运行记录。
+//
+// 竞态防护：watch(taskId) 在快速切换任务时会并发触发多次。
+// 早先没有序号守卫，任务 A 的日志会在任务 B 的界面里出现——
+// 用户以为看到的是 B 的运行记录，实际是 A 的。
+let runsSeq = 0
+
 async function loadRuns() {
-  if (!taskId.value) { runs.value = []; return }
+  const id = taskId.value
+  if (!id) { runs.value = []; return }
+  const seq = ++runsSeq
   loading.value = true
   loadError.value = null
   try {
-    runs.value = (await taskApi.runs(taskId.value, 10)) || []
+    const list = (await taskApi.runs(id, 10)) || []
+    if (seq !== runsSeq) return
+    runs.value = list
     expanded.value = new Set()
   } catch (e) {
+    if (seq !== runsSeq) return
     // 记下错误对象，让 ErrorState 决定文案与是否给重试。
     loadError.value = e
     runs.value = []
   } finally {
-    loading.value = false
+    // 只有最新一次请求能解除 loading，否则旧请求先返回会让加载态提前结束
+    if (seq === runsSeq) loading.value = false
   }
 }
 

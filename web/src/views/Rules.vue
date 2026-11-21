@@ -2,6 +2,7 @@
 // 命名正则规则维护：内置规则覆盖 + 自定义规则 + 试算测试。
 import { ref, reactive, inject, onMounted } from 'vue'
 import Modal from '../components/Modal.vue'
+import ErrorState from '../components/ErrorState.vue'
 import { ruleApi } from '../api'
 
 const toast = inject('toast')
@@ -9,6 +10,9 @@ const confirmDialog = inject('confirmDialog')
 
 const rules = ref([])
 const loading = ref(true)
+// 加载失败与"真的没有规则"必须区分：此前失败只 toast，
+// 然后 loading=false 渲染出空表格，用户分不清是"没有规则"还是"加载失败"。
+const loadError = ref(null)
 const showEdit = ref(false)
 const saving = ref(false)
 const form = reactive({ key: '', label: '', pattern: '', replace: '', enabled: true })
@@ -19,10 +23,12 @@ const test = reactive({ name: '第01集.mp4', result: null, testing: false })
 
 async function reload() {
   loading.value = true
+  loadError.value = null
   try {
     rules.value = (await ruleApi.list()) || []
   } catch (e) {
-    toast(e.message, 'error')
+    loadError.value = e
+    rules.value = []
   } finally {
     loading.value = false
   }
@@ -126,6 +132,11 @@ async function runTest() {
     </div>
 
     <div v-if="loading" class="loading-block"><span class="spinner"></span> 加载中…</div>
+
+    <!-- 加载失败：明确区别于「还没有规则」 -->
+    <ErrorState v-else-if="loadError" :error="loadError" :on-retry="reload"
+      hint="请确认 PanTransfer 服务正在运行，然后重试。" />
+
     <template v-else>
       <!-- 桌面端：表格 -->
       <div class="card rules-table-wrap">
