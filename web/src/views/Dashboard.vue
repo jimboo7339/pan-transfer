@@ -49,8 +49,13 @@ const scheduleText = computed(() => {
   return human === c ? c : `${human}（${c}）`
 })
 
+// 跳到任务页。
+//
+// 注意：任务是列表页而不是单任务页（暂无 /tasks/:id 路由），
+// 所以这里只能跳到列表。等有了任务详情路由，可以改成带 hash 定位到具体卡片。
+// 早先这里 push('/') 是错的——改版后 / 是仪表盘，点了等于原地不动。
 function gotoTask(id) {
-  if (id) router.push('/')
+  if (id) router.push('/tasks')
 }
 
 // 告警图标：error 用红色感叹号，warn 用黄色三角。
