@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -238,6 +240,22 @@ func (l *loginLimiter) recordFailure(key string, now time.Time) {
 		a.count = 0
 		a.firstAt = now
 	}
+	// 顺带清理过期项：allow() 只清理"被查询的那个 key"，
+	// 而这里才是不断插入新 key 的地方。不清理的话 attempts 无界增长，
+	// 配合伪造 XFF 可以直接把进程内存打爆。
+	l.sweepExpiredLocked(now)
+}
+
+// sweepExpiredLocked 丢弃已过期且不在锁定期的条目。调用方必须持锁。
+func (l *loginLimiter) sweepExpiredLocked(now time.Time) {
+	for k, a := range l.attempts {
+		if now.Before(a.lockedTo) {
+			continue // 还在锁定期，保留
+		}
+		if now.Sub(a.firstAt) > loginLockWindow {
+			delete(l.attempts, k)
+		}
+	}
 }
 
 // reset clears the counter after a successful login.
@@ -247,20 +265,50 @@ func (l *loginLimiter) reset(key string) {
 	l.mu.Unlock()
 }
 
-// clientKey identifies a login caller. Proxy-aware: the immediate peer is
-// meaningless behind a reverse proxy.
-func clientKey(r *http.Request) string {
+// clientKey 标识一个登录调用方，用于失败计数限流。
+//
+// 安全要点：默认**只信 r.RemoteAddr**，不解析 X-Forwarded-For / X-Real-Ip。
+//
+// 原因：这两个头是客户端可以任意伪造的。攻击者每次请求换一个随机
+// X-Forwarded-For，loginLimiter 的 key 每次都不同，
+// loginMaxFailures=5 的锁定完全失效 → 4 位数字口令可被高速爆破。
+//
+// 只有在**显式配置了可信代理**（PAN_TRANSFER_TRUST_PROXY=1）时才解析，
+// 且取最右侧的值（最右侧是离本服务最近的那一跳，由自己的反代写入）。
+// 直接暴露公网时（无反代）保留默认的 RemoteAddr，是最安全的。
+func (s *Server) clientKey(r *http.Request) string {
+	if !s.trustProxy() {
+		return hostOnly(r.RemoteAddr)
+	}
+	// 可信代理场景：取 XFF 最右侧（最近一跳），而不是最左侧。
 	if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); fwd != "" {
-		return strings.TrimSpace(strings.Split(fwd, ",")[0])
+		parts := strings.Split(fwd, ",")
+		if v := strings.TrimSpace(parts[len(parts)-1]); v != "" {
+			return v
+		}
 	}
 	if rip := strings.TrimSpace(r.Header.Get("X-Real-Ip")); rip != "" {
 		return rip
 	}
-	host := r.RemoteAddr
-	if i := strings.LastIndex(host, ":"); i > 0 {
-		host = host[:i]
+	return hostOnly(r.RemoteAddr)
+}
+
+// trustProxy 返回是否信任反代写入的客户端地址头。
+func (s *Server) trustProxy() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("PAN_TRANSFER_TRUST_PROXY")), "1")
+}
+
+// hostOnly 从 "ip:port" 中取出 host。
+//
+// 用 net.SplitHostPort 而不是 strings.LastIndex(":")：
+// 后者对无端口的 IPv6（如 "[::1]" 或 "::1"）会截错，
+// 结果是所有 IPv6 客户端共用同一个限流 key。
+func hostOnly(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
 	}
-	return host
+	return addr
 }
 
 // ---------- password hashing ----------

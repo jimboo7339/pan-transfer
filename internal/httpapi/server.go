@@ -154,6 +154,13 @@ func (s *Server) routes() {
 	s.registerCategoryRoutes()
 
 	// 认证
+	//
+	// login / logout 都不套 wrap（未登录时也要能访问），但各自内部做校验：
+	//   - login：限流 + 密码校验（见 handleLogin）；
+	//   - logout：必须校验 Origin。早先 handleLogout 完全裸奔，
+	//     任何人（无需登录）POST 一次就会 bumpSessionVersion，
+	//     把用户所有已签发 token 全部作废 —— 一个未鉴权的状态变更端点，
+//     还能被任意网页通过 form POST 触发（CSRF）。
 	m.HandleFunc("POST /api/auth/login", s.handleLogin)
 	m.HandleFunc("POST /api/auth/logout", s.handleLogout)
 	m.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
@@ -389,10 +396,28 @@ func respond(w http.ResponseWriter, data any) {
 	writeJSON(w, http.StatusOK, stdBody{Ok: true, Data: data})
 }
 
+// maxRequestBodyBytes 是单个请求体的上限。
+//
+// 为什么需要：decode() 直接 json.NewDecoder(r.Body).Decode(v)，
+// 没有 MaxBytesReader 的话，POST /api/config/import、
+// POST /api/tasks/batch（500 个 ID 只是数组长度，不是字节数）、
+// POST /api/notify/test 都能读入任意大小的 body。
+// 更要紧的是 /api/auth/login 也走 decode，而它**未鉴权**——
+// 可以在密码校验之前就把内存打满。
+const maxRequestBodyBytes = 4 << 20 // 4 MiB
+
+// decode 解析 JSON 请求体，带大小上限。
 func decode(r *http.Request, v any) error {
 	defer func() { _ = r.Body.Close() }()
+	// MaxBytesReader 在超过上限时让 Decode 返回错误，
+	// 而不是默默读完全部内容。
+	r.Body = http.MaxBytesReader(nil, r.Body, maxRequestBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(v); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return domain.Errorf(domain.CodeValidation, "请求体过大（上限 %d MiB）", maxRequestBodyBytes>>20)
+		}
 		return domain.Errorf(domain.CodeValidation, "请求体解析失败：%v", err)
 	}
 	return nil
@@ -548,7 +573,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// 暴力破解防护：NAS 上 4 位数字口令很常见，必须限流而不只是"慢一点"。
 	now := time.Now()
-	key := clientKey(r)
+	// clientKey 现在是 Server 的方法（要读 PAN_TRANSFER_TRUST_PROXY），
+	// 不再是包级函数。
+	key := s.clientKey(r)
 	if !s.logins.allow(key, now) {
 		w.Header().Set("Retry-After", "300")
 		writeErr(w, domain.Errorf(domain.CodeRateLimited, "登录失败次数过多，请 5 分钟后再试"))
@@ -581,7 +608,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // 会话是无状态的，单纯清 Cookie 会让已签发的 token 继续有效 30 天。
 // 这里递增会话版本，作废此前签发的全部 token——单人面板可以接受，
 // 而且这是让「怀疑密码泄露」真正可执行的唯一办法。
+//
+// 安全：这个端点不套 wrap（未登录也要能登出），但**必须校验 Origin**。
+// 早先它完全裸奔：任何人（无需登录）POST 一次就能 bumpSessionVersion，
+// 把用户所有已签发 token 全部作废，而且能被任意网页通过 form POST 触发。
+// 校验 Origin 后，跨站请求会被拒绝（浏览器会自动带上 Origin，
+// 而攻击者的页面无法伪造）。
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if !s.originAllowed(r) {
+		writeErr(w, domain.Errorf(domain.CodePermissionDenied, "跨站请求被拒绝"))
+		return
+	}
 	s.clearSessionCookie(w)
 	s.bumpSessionVersion(r.Context())
 	respond(w, map[string]bool{"ok": true})
