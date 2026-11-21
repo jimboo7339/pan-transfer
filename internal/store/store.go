@@ -44,7 +44,36 @@ func Open(path string) (*Store, error) {
 }
 
 // Close 关闭数据库。
-func (s *Store) Close() error { return s.db.Close() }
+//
+// 关闭前做一次 WAL 检查点并丢弃空闲连接，有两个作用：
+//
+//  1. 生产：干净的关闭会把 WAL 合并进主库，避免下次启动时回放一堆事务，
+//     也让「停容器后直接拷贝 db 文件」这种朴素备份不至于漏数据。
+//
+//  2. 测试：Windows 上 sql.DB.Close() 不立即释放底层文件句柄，
+//     t.TempDir() 的 RemoveAll 会间歇性报"目录非空"。先丢弃空闲连接
+//     再关闭，句柄才会稳定释放（这是平台特性，不是产品缺陷）。
+func (s *Store) Close() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	// 检查点失败不阻断关闭：WAL 会在下次打开时自动回放。
+	_, _ = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	s.db.SetMaxIdleConns(0)
+	return s.db.Close()
+}
+
+// CloseIdle 丢弃连接池里的空闲连接，但不关闭数据库。
+//
+// 用途：测试需要在关库之前先把 WAL 合并掉，好让紧随其后的目录清理成功。
+// 生产代码不需要调用它（Close 已经包含等价动作）。
+func (s *Store) CloseIdle() {
+	if s == nil || s.db == nil {
+		return
+	}
+	_, _ = s.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	s.db.SetMaxIdleConns(0)
+}
 
 // SetCipher 注入凭据加密器（启动时由 main 调用；测试可传 nil 关闭加密）。
 func (s *Store) SetCipher(c *secret.Cipher) { s.cipher = c }
@@ -69,7 +98,6 @@ func (s *Store) decryptConfig(raw string) (string, error) {
 	}
 	return out, nil
 }
-
 
 // withShareFIDInURL 把文件夹 fid 写入分享链接（CASX 约定：#/list/share/<fid>），
 // 同时去掉已有 fid/fileId 参数与旧 fragment，避免重复或冲突。

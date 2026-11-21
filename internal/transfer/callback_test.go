@@ -68,11 +68,8 @@ func TestSkipZeroCallback(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	st, err := store.Open(t.TempDir() + "/cb3.db")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
+	st, closeStore := newTestStore(t)
+	defer closeStore()
 	ctx := context.Background()
 	enabled := true
 	svc := New(Options{Store: st})
@@ -158,11 +155,8 @@ func TestRoundCallbackFlow(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	st, err := store.Open(t.TempDir() + "/cb.db")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
+	st, closeStore := newTestStore(t)
+	defer closeStore()
 	ctx := context.Background()
 	enabled := true
 	catID, err := st.SaveCategory(ctx, &store.TaskCategory{
@@ -250,11 +244,8 @@ func TestPerTaskGetCallback(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	st, err := store.Open(t.TempDir() + "/cb2.db")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer st.Close()
+	st, closeStore := newTestStore(t)
+	defer closeStore()
 	ctx := context.Background()
 	enabled := true
 	catID, err := st.SaveCategory(ctx, &store.TaskCategory{

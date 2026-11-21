@@ -65,6 +65,14 @@ func (rt *runtime) current() (*store.Store, *accounts.Manager, *transfer.Service
 	return rt.st, rt.mgr, rt.svc
 }
 
+// attachService 记录 Service（装配顺序为「先 API server 后 Service」，
+// 因此构造 runtime 时还没有 svc；还原时需要它能停调度）。
+func (rt *runtime) attachService(svc *transfer.Service) {
+	rt.mu.Lock()
+	rt.svc = svc
+	rt.mu.Unlock()
+}
+
 // restoreFrom 用备份替换数据库并重建全部依赖。
 //
 // 顺序很关键：
@@ -177,16 +185,36 @@ func main() {
 
 	accMgr := accounts.New(st)
 	notifier := notify.New(st, log)
+
+	rt := &runtime{st: st, mgr: accMgr, data: *dataDir}
+	rt.stSlot = &rt.st
+
+	// 装配顺序有依赖：Service 需要 Metrics 才能统计「转存了多少文件」「调度扫了几次」，
+	// 而 metrics 实例住在 httpapi（指标是运维关注点）。所以先建 API server 拿到
+	// 桥接器，再建 Service，最后回填 Transfer 依赖。
+	srv := httpapi.NewServer(httpapi.Deps{
+		Store:             rt.stSlot,
+		Accounts:          accMgr,
+		Notify:            notifier,
+		Log:               log,
+		Version:           version,
+		AllowedOrigins:    os.Getenv("PAN_TRANSFER_ALLOWED_ORIGINS"),
+		ForceSecureCookie: os.Getenv("PAN_TRANSFER_SECURE_COOKIE"),
+		DataDir:           *dataDir,
+		DBPath:            dbPath,
+		Restore:           rt.restoreFrom,
+	})
+
 	svc := transfer.New(transfer.Options{
-		Exec:   accMgr,
-		Store:  st,
-		Log:    log,
-		Notify: notifier,
+		Exec:    accMgr,
+		Store:   st,
+		Log:     log,
+		Notify:  notifier,
+		Metrics: srv.MetricsSink(),
 	})
 	svc.Start()
-
-	rt := &runtime{st: st, mgr: accMgr, svc: svc, data: *dataDir}
-	rt.stSlot = &rt.st
+	rt.attachService(svc)
+	srv.SetTransfer(svc)
 
 	// 每日自动备份：data/pantransfer.db 是唯一有状态资产，容器里没有 sqlite3，
 	// 让用户"手动备份"是不现实的。保留最近 7 份。
@@ -211,20 +239,6 @@ func main() {
 			<-ticker.C
 		}
 	}()
-
-	srv := httpapi.NewServer(httpapi.Deps{
-		Store:             rt.stSlot,
-		Accounts:          accMgr,
-		Transfer:          svc,
-		Notify:            notifier,
-		Log:               log,
-		Version:           version,
-		AllowedOrigins:    os.Getenv("PAN_TRANSFER_ALLOWED_ORIGINS"),
-		ForceSecureCookie: os.Getenv("PAN_TRANSFER_SECURE_COOKIE"),
-		DataDir:           *dataDir,
-		DBPath:            dbPath,
-		Restore:           rt.restoreFrom,
-	})
 
 	root := http.Handler(srv.Handler())
 	// 静态资源：web/dist 内嵌；SPA 路由回退 index.html

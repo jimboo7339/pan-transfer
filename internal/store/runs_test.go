@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -15,11 +16,8 @@ func newTestTask(name string) *domain.DramaTask {
 
 // 运行记录：FinishRun 应写入详细日志；PruneRuns 按保留天数清理但每个任务保底。
 func TestRunLogAndPrune(t *testing.T) {
-	s, err := Open(t.TempDir() + "/runs.db")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer s.Close()
+	s, dir, closeStore := openTestStore(t)
+	defer func() { closeStore(); _ = os.RemoveAll(dir) }()
 	ctx := context.Background()
 
 	taskID, err := s.CreateTask(ctx, newTestTask("清理测试"))
@@ -85,11 +83,8 @@ func TestRunLogAndPrune(t *testing.T) {
 }
 
 func TestClearSavedNames(t *testing.T) {
-	s, err := Open(t.TempDir() + "/saved.db")
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer s.Close()
+	s, dir, closeStore := openTestStore(t)
+	defer func() { closeStore(); _ = os.RemoveAll(dir) }()
 	ctx := context.Background()
 
 	taskID, err := s.CreateTask(ctx, newTestTask("历史测试"))

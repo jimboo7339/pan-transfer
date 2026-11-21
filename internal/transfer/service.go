@@ -61,6 +61,25 @@ type Options struct {
 	Store  *store.Store
 	Log    *slog.Logger
 	Notify Notifier
+
+	// Metrics 是可选的运行指标回调，由 main 注入（httpapi.metrics）。
+	//
+	// 为什么用回调而不是直接依赖 httpapi：transfer 是领域服务层，
+	// 反向依赖 HTTP 层会破坏分层（httpapi 已经依赖 transfer）。
+	// 回调保持单向依赖，同时让 Service 在测试里可以传 nil。
+	Metrics MetricsSink
+}
+
+// MetricsSink 是 Service 向外报告运行指标的接口。
+//
+// 只包含 Service 真正知道的事件；HTTP 层的请求量/耗时由中间件自己统计。
+type MetricsSink interface {
+	// SweepCompleted 在一次调度扫描结束后调用。
+	SweepCompleted()
+	// Transferred 在转存了 n 个文件后调用。
+	Transferred(n int)
+	// RateLimited 在命中上游限流时调用（风控信号）。
+	RateLimited()
 }
 
 // Service 追剧转存服务。
@@ -98,6 +117,9 @@ type Service struct {
 	schedEnabled bool      // 最近一次 sweep 观察到的全局调度开关状态
 	sweeps       int64     // sweep 完成次数（区分"从未扫描"与"扫描到已关闭"）
 
+	// metrics 是可选的运行指标接收者（由 main 注入，测试可为 nil）。
+	metrics MetricsSink
+
 	appCtx context.Context
 	cancel context.CancelFunc
 
@@ -128,6 +150,7 @@ func New(opts Options) *Service {
 		appCtx:      ctx,
 		cancel:      cancel,
 		jobs:        newJobRegistry(50),
+		metrics:     opts.Metrics,
 	}
 }
 
@@ -332,6 +355,11 @@ func (s *Service) sweep() {
 	s.schedEnabled = enabled != "off"
 	s.sweeps++
 	s.schedMu.Unlock()
+
+	// 指标：调度扫描次数长期不涨 = 调度协程挂了，这是最直接的存活信号。
+	if s.metrics != nil {
+		s.metrics.SweepCompleted()
+	}
 
 	if enabled == "off" {
 		return
@@ -708,6 +736,11 @@ func (s *Service) RunTask(ctx context.Context, taskID int64, trigger string) (*R
 	}
 	res.TreeSummary = strings.Join(trees, "\n")
 	_ = s.st.UpdateTaskRunState(ctx, taskID, nowStr, res.Status, res.Message, res.TreeSummary)
+
+	// 指标：累计转存量。
+	if s.metrics != nil && res.TransferCount > 0 {
+		s.metrics.Transferred(res.TransferCount)
+	}
 
 	// 通知：仅在本次有新转存文件、或整次运行失败时推送；
 	// 0 文件（无新剧集 / 全部已转存）静默，避免定时任务空跑刷屏。

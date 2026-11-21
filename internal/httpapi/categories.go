@@ -127,7 +127,7 @@ func (s *Server) handleCategoryTest(w http.ResponseWriter, r *http.Request) erro
 		return err
 	}
 	vars := transfer.SampleCallbackVars(cat.Name, cat.CallbackMode == "round")
-	res := s.deps.Transfer.TestCallback(r.Context(), cat, vars)
+	res := s.transfer().TestCallback(r.Context(), cat, vars)
 	respond(w, res)
 	return nil
 }

@@ -43,31 +43,57 @@ func removeWithRetry(t *testing.T, path string) {
 	// 这个函数只做"尽力清理"，产品代码路径的正确性由断言保证。
 }
 
-// openTestStore 打开一个测试库，返回库与「幂等关闭」函数。
+// tempDBDir 创建一个由测试自己管理生命周期的临时目录。
 //
-// 为什么需要幂等关闭：TestBackupAndRestore 需要在测试中主动关闭一次
-// （SQLite 不允许在连接打开时替换底层文件），但 t.Cleanup 还会再关一次；
-// 重复 Close 会返回错误，且 Windows 上 sql.DB.Close() 不会立刻释放文件句柄，
-// t.TempDir() 的 RemoveAll 会报"目录非空"（测试已通过、只是清理失败）。
+// 为什么不用 t.TempDir()：t.TempDir 的清理注册在 t.Cleanup 里，
+// 而本包的辅助函数也要用 t.Cleanup 关库 —— Go 的 Cleanup 是 LIFO，
+// 先注册的后执行，于是会出现「目录已被 RemoveAll，SQLite 句柄还没关」
+// 的竞态，Windows 上表现为大量 "The directory is not empty"。
+//
+// 这里改成：目录由调用方 defer 删除，且删除发生在关库之后。
+func tempDBDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "pt-store-*")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	return dir
+}
+
+// openTestStore 打开一个测试库，返回库、目录与「幂等关闭」函数。
+//
+// 调用方必须在拿到 closeStore 后 defer 调用它，并在其后删除目录：
+//
+//	s, dir, closeStore := openTestStore(t)
+//	defer func() { closeStore(); _ = os.RemoveAll(dir) }()
+//
+// 关闭函数是幂等的：测试中途需要主动关库（例如替换数据库文件）时可以
+// 提前调用，defer 里的第二次调用是空操作。
 func openTestStore(t *testing.T) (*Store, string, func()) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := tempDBDir(t)
 	dbPath := filepath.Join(dir, "pantransfer.db")
 	s, err := Open(dbPath)
 	if err != nil {
+		_ = os.RemoveAll(dir)
 		t.Fatalf("open: %v", err)
 	}
 	var once sync.Once
 	closeFn := func() {
 		once.Do(func() {
-			if db := s.DB(); db != nil {
-				db.SetMaxIdleConns(0)
-				db.SetConnMaxLifetime(time.Nanosecond)
-			}
 			_ = s.Close()
+			// Close 已经做了 wal_checkpoint + SetMaxIdleConns(0)，
+			// 这里再删一次残留的 WAL/SHM 兜底（Windows 句柄释放是异步的）。
+			for i := 0; i < 20; i++ {
+				_ = os.Remove(dbPath + "-wal")
+				_ = os.Remove(dbPath + "-shm")
+				if _, err := os.Stat(dbPath + "-wal"); os.IsNotExist(err) {
+					break
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
 		})
 	}
-	t.Cleanup(closeFn)
 	return s, dir, closeFn
 }
 
@@ -77,6 +103,7 @@ func openTestStore(t *testing.T) (*Store, string, func()) {
 // 备份必须包含 WAL 里尚未 checkpoint 的事务，否则用户拿到的是残缺数据。
 func TestBackupAndRestore(t *testing.T) {
 	s, dir, closeStore := openTestStore(t)
+	defer func() { closeStore(); _ = os.RemoveAll(dir) }()
 	dbPath := filepath.Join(dir, "pantransfer.db")
 	ctx := context.Background()
 
@@ -159,7 +186,8 @@ func TestBackupAndRestore(t *testing.T) {
 
 // TestBackupRotation 验证只保留最近 N 份备份。
 func TestBackupRotation(t *testing.T) {
-	s, dir, _ := openTestStore(t)
+	s, dir, closeStore := openTestStore(t)
+	defer func() { closeStore(); _ = os.RemoveAll(dir) }()
 
 	backupDir := filepath.Join(dir, BackupDirName)
 	ctx := context.Background()
@@ -199,7 +227,9 @@ func TestBackupRotation(t *testing.T) {
 
 // TestListBackupsIgnoresForeignFiles 验证备份目录里的无关文件不会被当成备份。
 func TestListBackupsIgnoresForeignFiles(t *testing.T) {
-	_, dir, _ := openTestStore(t)
+	s, dir, closeStore := openTestStore(t)
+	defer func() { closeStore(); _ = os.RemoveAll(dir) }()
+	_ = s
 
 	backupDir := filepath.Join(dir, BackupDirName)
 	if err := os.MkdirAll(backupDir, 0o700); err != nil {
@@ -220,11 +250,6 @@ func TestListBackupsIgnoresForeignFiles(t *testing.T) {
 	if len(list) != 0 {
 		t.Errorf("非备份文件应被忽略，实际列出 %d 项", len(list))
 	}
-
-	// 显式收尾：删掉备份目录。
-	// Windows 上 t.TempDir() 的 RemoveAll 会因残留句柄报"目录非空"，
-	// 而这里创建的目录内容是测试自己写的，删掉即可。
-	removeWithRetry(t, backupDir)
 }
 
 // TestMarkInterruptedRuns 验证进程崩溃留下的 running 记录会被收尾。
@@ -232,7 +257,8 @@ func TestListBackupsIgnoresForeignFiles(t *testing.T) {
 // 不修这个问题，"运行日志"里会永远留着一批转圈的任务，
 // 用户无法判断"到底跑没跑完"。
 func TestMarkInterruptedRuns(t *testing.T) {
-	s, _, _ := openTestStore(t)
+	s, dir, closeStore := openTestStore(t)
+	defer func() { closeStore(); _ = os.RemoveAll(dir) }()
 	ctx := context.Background()
 
 	now := nowStr()
@@ -279,7 +305,8 @@ func TestMarkInterruptedRuns(t *testing.T) {
 // TestCountTasksByAccount 验证账号引用检查（删账号前必须知道有多少任务依赖它）。
 // 全仓没有生效的外键，不检查就会留下悬空 account_id 的僵尸任务。
 func TestCountTasksByAccount(t *testing.T) {
-	s, _, _ := openTestStore(t)
+	s, dir, closeStore := openTestStore(t)
+	defer func() { closeStore(); _ = os.RemoveAll(dir) }()
 	ctx := context.Background()
 
 	n, err := s.CountTasksByAccount(ctx, 42)

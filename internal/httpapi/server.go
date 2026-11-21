@@ -90,6 +90,9 @@ type Server struct {
 	// （测试中每个请求都会调 Handler()，生产里 main 也会调一次）。
 	handlerOnce sync.Once
 	handler     http.Handler
+
+	// depsMu 保护 deps（Transfer 在装配期回填，其余字段只读）。
+	depsMu sync.RWMutex
 }
 
 // NewServer 构造 API 服务（含路由注册）。
@@ -112,6 +115,33 @@ func (s *Server) Handler() http.Handler {
 		s.handler = httpInstrumentation(s.mux, s.metrics, s.deps.Log)
 	})
 	return s.handler
+}
+
+// SetTransfer 回填 Transfer 依赖。
+//
+// 为什么需要它：Service 的构造需要 Metrics（指标桥接器），
+// 而桥接器住在 httpapi。于是装配顺序变成「先 API server（拿到 sink）→
+// 再 Service → 回填」，这个 setter 就是回填的那一步。
+// 在 SetTransfer 之前调 Transfer 相关接口会 panic，因此只在 main 装配期使用。
+func (s *Server) SetTransfer(svc *transfer.Service) {
+	s.depsMu.Lock()
+	s.deps.Transfer = svc
+	s.depsMu.Unlock()
+}
+
+// transfer 返回当前 Service（每次请求都读，避免还原后用到旧实例）。
+func (s *Server) transfer() *transfer.Service {
+	s.depsMu.Lock()
+	svc := s.deps.Transfer
+	s.depsMu.Unlock()
+	return svc
+}
+
+//
+// 存在的意义：transfer 是领域层，不能直接 import httpapi 拿 metrics；
+// 通过 main 装配把 sink 交给它，依赖方向保持 httpapi → transfer 单向。
+func (s *Server) MetricsSink() transfer.MetricsSink {
+	return newMetricsSink(s.metrics)
 }
 
 // handleMetrics 以 Prometheus 文本格式输出指标。
@@ -211,8 +241,8 @@ func (s *Server) handleHealthReady(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 2. 调度器是否在跑（正在执行任务数 / 最近扫描时间）。
-	if s.deps.Transfer != nil {
-		stats := s.deps.Transfer.Stats(ctx)
+	if svc := s.transfer(); svc != nil {
+		stats := svc.Stats(ctx)
 		checks["scheduler"] = "ok"
 		details["running_tasks"] = fmt.Sprintf("%d", len(stats.RunningTaskIDs))
 		if stats.LastSweepAt != "" {
@@ -726,7 +756,7 @@ func (s *Server) handleSharePreview(w http.ResponseWriter, r *http.Request) erro
 	if err := decode(r, &in); err != nil {
 		return err
 	}
-	res, err := s.deps.Transfer.PreviewShare(r.Context(), in)
+	res, err := s.transfer().PreviewShare(r.Context(), in)
 	if err != nil {
 		return err
 	}
@@ -908,7 +938,7 @@ func taskOut(t *domain.DramaTask) map[string]any {
 
 // handleJobList 列出运行中的（及最近结束的）job。
 func (s *Server) handleJobList(w http.ResponseWriter, r *http.Request) error {
-	list := s.deps.Transfer.ListJobs()
+	list := s.transfer().ListJobs()
 	running := 0
 	for _, j := range list {
 		if j.Status == "running" {
@@ -928,7 +958,7 @@ func (s *Server) handleJobGet(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	job, ok := s.deps.Transfer.GetJob(id)
+	job, ok := s.transfer().GetJob(id)
 	if !ok {
 		return domain.Errorf(domain.CodeNotFound, "运行句柄不存在或已过期（句柄是内存态，重启即清空）")
 	}
@@ -945,7 +975,7 @@ func (s *Server) handleJobCancel(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	if err := s.deps.Transfer.CancelJob(id); err != nil {
+	if err := s.transfer().CancelJob(id); err != nil {
 		return err
 	}
 	respond(w, map[string]any{"ok": true, "message": "已请求取消；当前进行中的单次请求会自然结束"})
@@ -958,13 +988,13 @@ func (s *Server) handleJobDelete(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	s.deps.Transfer.RemoveJob(id)
+	s.transfer().RemoveJob(id)
 	respond(w, map[string]bool{"ok": true})
 	return nil
 }
 
 func (s *Server) handleTaskList(w http.ResponseWriter, r *http.Request) error {
-	list, err := s.deps.Transfer.ListTasks(r.Context())
+	list, err := s.transfer().ListTasks(r.Context())
 	if err != nil {
 		return err
 	}
@@ -981,7 +1011,7 @@ func (s *Server) handleTaskCreate(w http.ResponseWriter, r *http.Request) error 
 	if err := decode(r, &in); err != nil {
 		return err
 	}
-	id, err := s.deps.Transfer.SaveTask(r.Context(), in.toTask())
+	id, err := s.transfer().SaveTask(r.Context(), in.toTask())
 	if err != nil {
 		return err
 	}
@@ -999,7 +1029,7 @@ func (s *Server) handleTaskUpdate(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 	in.ID = id
-	if _, err := s.deps.Transfer.SaveTask(r.Context(), in.toTask()); err != nil {
+	if _, err := s.transfer().SaveTask(r.Context(), in.toTask()); err != nil {
 		return err
 	}
 	respond(w, map[string]bool{"ok": true})
@@ -1011,7 +1041,7 @@ func (s *Server) handleTaskDelete(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
-	if err := s.deps.Transfer.DeleteTask(r.Context(), id); err != nil {
+	if err := s.transfer().DeleteTask(r.Context(), id); err != nil {
 		return err
 	}
 	respond(w, map[string]bool{"ok": true})
@@ -1029,7 +1059,7 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) error 
 	if err := decode(r, &in); err != nil {
 		return err
 	}
-	if err := s.deps.Transfer.SetTaskStatus(r.Context(), id, in.Status); err != nil {
+	if err := s.transfer().SetTaskStatus(r.Context(), id, in.Status); err != nil {
 		return err
 	}
 	respond(w, map[string]bool{"ok": true})
@@ -1051,7 +1081,7 @@ func (s *Server) handleTaskRun(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	job, err := s.deps.Transfer.StartTask(r.Context(), id)
+	job, err := s.transfer().StartTask(r.Context(), id)
 	if err != nil {
 		return err
 	}
@@ -1074,7 +1104,7 @@ func (s *Server) handleTaskRuns(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	runs, err := s.deps.Transfer.ListRuns(r.Context(), id, limit)
+	runs, err := s.transfer().ListRuns(r.Context(), id, limit)
 	if err != nil {
 		return err
 	}
@@ -1088,7 +1118,7 @@ func (s *Server) handleTaskSavedNames(w http.ResponseWriter, r *http.Request) er
 		return err
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	names, err := s.deps.Transfer.ListSavedNames(r.Context(), id, limit)
+	names, err := s.transfer().ListSavedNames(r.Context(), id, limit)
 	if err != nil {
 		return err
 	}

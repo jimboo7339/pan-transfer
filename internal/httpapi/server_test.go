@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,16 +35,52 @@ func mustHashForTest(t *testing.T, pwd string) string {
 	return h
 }
 
+// newTestStore 打开一个测试库并返回「关库 + 清目录」函数。
+//
+// 与 transfer 包同名辅助同语义：把「关库」和「删目录」绑成一个函数由
+// 调用方 defer，避免 t.TempDir() 的 LIFO 清理与 defer 关库产生顺序竞态。
+func newTestStore(t *testing.T) (*store.Store, func()) {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "pt-httpapi-*")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	dbPath := filepath.Join(dir, "test.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		t.Fatalf("open store: %v", err)
+	}
+	var once sync.Once
+	closeFn := func() {
+		once.Do(func() {
+			st.CloseIdle()
+			_ = st.Close()
+			for i := 0; i < 20; i++ {
+				_ = os.Remove(dbPath + "-wal")
+				_ = os.Remove(dbPath + "-shm")
+				if _, err := os.Stat(dbPath + "-wal"); os.IsNotExist(err) {
+					break
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			_ = os.RemoveAll(dir)
+		})
+	}
+	return st, closeFn
+}
+
 // newTestServer 构造一个真实临时库驱动的 API server。
 // 复用 store 包既有的"真实 SQLite + 真实 SQL"测试范式，而不是 mock——
 // 认证、凭据脱敏、账号删除保护这些都是端到端行为，mock 测不出竞态与 SQL 错误。
+//
+// 临时目录不用 t.TempDir()：它的清理在 t.Cleanup（LIFO），
+// 与 defer 关库的顺序在不同测试里不一致，Windows 上会报"目录非空"。
+// 这里由 newTestStore 统一控制顺序。
 func newTestServer(t *testing.T) (*Server, *store.Store) {
 	t.Helper()
-	dir := t.TempDir()
-	st, err := store.Open(filepath.Join(dir, "pantransfer.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
+	st, closeStore := newTestStore(t)
+
 	stPtr := st
 	mgr := accounts.New(st)
 	svc := transfer.New(transfer.Options{Store: st, Exec: mgr})
@@ -52,15 +90,12 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 		Transfer: svc,
 		Notify:   notify.New(st, nil),
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-		DataDir:  dir,
-		DBPath:   filepath.Join(dir, "pantransfer.db"),
+		DataDir:  "unused",
+		DBPath:   "unused",
 	})
 	t.Cleanup(func() {
 		svc.Close()
-		forceClose(srv)
-		// 必须在 forceClose 之后关库：SetMaxIdleConns(0) 丢弃空闲连接，
-		// 句柄才真正释放，Windows 上 t.TempDir() 的 RemoveAll 才不会报"目录非空"。
-		_ = st.Close()
+		closeStore()
 	})
 	return srv, st
 }

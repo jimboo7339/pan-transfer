@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -9,11 +10,9 @@ import (
 // 旧的 task 级 share_fid 应迁移进链接：单链接写入 #/list/share/<fid>，
 // 多链接无法确定归属则只清空、不改链接。
 func TestMigrateLegacyShareFID(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "migrate.db")
-	s, err := Open(path)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
+	s, dir, closeStore := openTestStore(t)
+	defer func() { closeStore(); _ = os.RemoveAll(dir) }()
+	path := filepath.Join(dir, "pantransfer.db")
 	const fid = "0123456789abcdef0123456789abcdef"
 	now := nowStr()
 
@@ -35,16 +34,19 @@ func TestMigrateLegacyShareFID(t *testing.T) {
 	}
 	multiID, _ := res.LastInsertId()
 
-	if err := s.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	closeStore()
 
 	// 重新打开触发迁移
 	s2, err := Open(path)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	defer s2.Close()
+	t.Cleanup(func() {
+		if db := s2.DB(); db != nil {
+			db.SetMaxIdleConns(0)
+		}
+		_ = s2.Close()
+	})
 
 	var linksJSON, shareURL, shareFID string
 	if err := s2.db.QueryRow(`SELECT share_links, share_url, share_fid FROM tasks WHERE id=?`, singleID).
