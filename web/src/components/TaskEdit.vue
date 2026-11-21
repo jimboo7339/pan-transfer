@@ -1,6 +1,6 @@
 <script setup>
 // 编辑/新建追剧转存任务。
-import { ref, reactive, inject, computed, watch } from 'vue'
+import { ref, reactive, inject, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import Modal from './Modal.vue'
 import SharePreview from './SharePreview.vue'
 import FileBrowser from './FileBrowser.vue'
@@ -87,6 +87,14 @@ const builtinRules = computed(() => rules.value.filter(r => r.builtin))
 const emit = defineEmits(['saved'])
 const previewRef = ref(null)
 const browserRef = ref(null)
+
+// 「n」快捷键：由 App 层派发 pt:new-task 事件触发。
+// 只在任务页（组件已挂载）时生效；其它页面没有监听，按下无反应。
+function onNewTaskShortcut() {
+  open(null)
+}
+onMounted(() => window.addEventListener('pt:new-task', onNewTaskShortcut))
+onBeforeUnmount(() => window.removeEventListener('pt:new-task', onNewTaskShortcut))
 
 async function open(task) {
   visible.value = true

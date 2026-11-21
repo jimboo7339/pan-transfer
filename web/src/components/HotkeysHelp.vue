@@ -1,0 +1,77 @@
+<script setup>
+// 快捷键帮助面板（按 ? 打开）。
+//
+// 为什么需要：快捷键如果不被发现就等于不存在。用户不会去读 README 里的
+// 快捷键列表，但会在界面上看到一个"?"按钮或提示。
+//
+// 这里同时承担"教学"职责：每一行除了键位，还说明它做什么、
+// 以及 g 前缀序列的用法（这是最容易被误解的——用户按了 g 之后
+// 不知道还要再按一个键）。
+import { HOTKEYS } from '../hotkeys'
+
+defineProps({ modelValue: Boolean })
+const emit = defineEmits(['update:modelValue'])
+
+function close() {
+  emit('update:modelValue', false)
+}
+</script>
+
+<template>
+  <Teleport to="body">
+    <div v-if="modelValue" class="modal-overlay" @mousedown.self="close">
+      <div class="modal" style="width: 480px" role="dialog" aria-modal="true"
+        aria-labelledby="hotkey-title">
+        <div class="modal-head">
+          <div class="modal-title" id="hotkey-title">键盘快捷键</div>
+          <button class="modal-close" aria-label="关闭" @click="close">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="hotkeys-list">
+            <div v-for="(h, i) in HOTKEYS" :key="i" class="hotkeys-row">
+              <div class="hotkeys-keys">
+                <kbd v-for="(k, j) in h.keys" :key="j" class="hotkeys-kbd">{{ k }}</kbd>
+              </div>
+              <div class="hotkeys-desc">{{ h.desc }}</div>
+            </div>
+          </div>
+          <div class="hotkeys-note">
+            <b>提示：</b>带 <code class="mono">g</code> 前缀的是两步序列——
+            先按 <kbd class="hotkeys-kbd-inline">g</kbd>，再按对应字母（1.2 秒内）。
+            输入框内不会触发任何快捷键，避免打字时误触。
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn btn-primary" @click="close">知道了</button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
+</template>
+
+<style scoped>
+.hotkeys-list { display: flex; flex-direction: column; gap: 2px; }
+.hotkeys-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 7px 0; border-bottom: 1px solid var(--border);
+}
+.hotkeys-row:last-child { border-bottom: none; }
+.hotkeys-keys { display: flex; gap: 4px; flex-shrink: 0; width: 110px; }
+.hotkeys-kbd {
+  font-family: var(--mono); font-size: 11.5px; color: var(--text-2);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-bottom-width: 2px; border-radius: 5px; padding: 2px 7px;
+  min-width: 24px; text-align: center;
+}
+.hotkeys-kbd-inline {
+  font-family: var(--mono); font-size: 11px; color: var(--text-2);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px;
+}
+.hotkeys-desc { font-size: 13px; color: var(--text-2); }
+.hotkeys-note {
+  margin-top: 14px; padding: 10px 12px; border-radius: 8px;
+  background: var(--surface-2); font-size: 12.5px; color: var(--text-2);
+  line-height: 1.7;
+}
+</style>

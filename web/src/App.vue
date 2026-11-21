@@ -4,7 +4,13 @@ import { useRoute } from 'vue-router'
 import ThemeToggle from './components/ThemeToggle.vue'
 import ConfirmDialog from './components/ConfirmDialog.vue'
 import CommandPalette from './components/CommandPalette.vue'
+import HotkeysHelp from './components/HotkeysHelp.vue'
 import { authApi, setToken } from './api'
+// 快捷键在 setup 外注册：它需要在应用挂载时就监听，
+// 而不是等某个组件渲染。hotkeys.js 内部自注册并导出 showHelp。
+import { useHotkeys } from './hotkeys'
+
+const { showHelp: showHotkeysHelp } = useHotkeys()
 
 const session = inject('session')
 const refreshSession = inject('refreshSession')
@@ -152,7 +158,14 @@ async function doLogin() {
         </router-link>
       </nav>
       <div class="sidebar-footer">
-        <div class="mb-8"><ThemeToggle /></div>
+        <div class="mb-8 flex" style="gap: 6px; align-items: center">
+          <ThemeToggle />
+          <span class="flex-1"></span>
+          <button class="btn btn-icon btn-ghost" title="键盘快捷键（?）"
+            aria-label="键盘快捷键" @click="showHotkeysHelp = true">
+            <span style="font-size: 13px; font-weight: 600">?</span>
+          </button>
+        </div>
         <div class="sidebar-search-hint">
           <button class="btn btn-sm sidebar-search-btn" @click="paletteRef && paletteRef.open()">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -193,6 +206,9 @@ async function doLogin() {
 
   <!-- 全局搜索面板（⌘K / Ctrl+K / /） -->
   <CommandPalette ref="paletteRef" />
+
+  <!-- 快捷键帮助（按 ? 打开） -->
+  <HotkeysHelp v-model="showHotkeysHelp" />
 </template>
 
 <style scoped>
