@@ -107,7 +107,12 @@ watch(
       <div class="modal" :class="size ? 'modal-' + size : ''"
         ref="panel" role="dialog" aria-modal="true" :aria-labelledby="titleId" tabindex="-1">
         <div class="modal-head">
-          <div class="modal-title" :id="titleId">{{ title }}</div>
+          <!-- title 是纯文本（无障碍需要 aria-labelledby 指向它）；
+               需要富文本标题（如"分享链接预览（共 N 个文件）"）时传 #title 插槽，
+               此时插槽内容放在 span 里，无障碍名回退到 title 或 slot 文本。 -->
+          <div class="modal-title" :id="titleId">
+            <slot name="title">{{ title }}</slot>
+          </div>
           <button class="modal-close" aria-label="关闭" @click="close">✕</button>
         </div>
         <div class="modal-body">

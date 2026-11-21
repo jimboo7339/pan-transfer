@@ -7,10 +7,23 @@
 // 这里同时承担"教学"职责：每一行除了键位，还说明它做什么、
 // 以及 g 前缀序列的用法（这是最容易被误解的——用户按了 g 之后
 // 不知道还要再按一个键）。
-import { HOTKEYS } from '../hotkeys'
+import { computed } from 'vue'
+import { HOTKEYS as HOTKEY_LIST } from '../hotkeys'
+import Modal from './Modal.vue'
 
-defineProps({ modelValue: Boolean })
+// 必须显式声明为 setup 内的常量，模板才能访问到。
+// （直接 import 的绑定在某些构建组合下不会暴露给模板编译器。）
+const HOTKEYS = HOTKEY_LIST
+
+const props = defineProps({ modelValue: Boolean })
 const emit = defineEmits(['update:modelValue'])
+
+// 不能直接 v-model="modelValue"：那是在给 prop 赋值。
+// 双向绑定的正确做法是计算属性代理到 emit。
+const open = computed({
+  get: () => !!props.modelValue,
+  set: (v) => emit('update:modelValue', v),
+})
 
 function close() {
   emit('update:modelValue', false)
@@ -18,35 +31,24 @@ function close() {
 </script>
 
 <template>
-  <Teleport to="body">
-    <div v-if="modelValue" class="modal-overlay" @mousedown.self="close">
-      <div class="modal" style="width: 480px" role="dialog" aria-modal="true"
-        aria-labelledby="hotkey-title">
-        <div class="modal-head">
-          <div class="modal-title" id="hotkey-title">键盘快捷键</div>
-          <button class="modal-close" aria-label="关闭" @click="close">✕</button>
+  <Modal v-model="open" title="键盘快捷键">
+    <div class="hotkeys-list">
+      <div v-for="(h, i) in HOTKEYS" :key="i" class="hotkeys-row">
+        <div class="hotkeys-keys">
+          <kbd v-for="(k, j) in h.keys" :key="j" class="hotkeys-kbd">{{ k }}</kbd>
         </div>
-        <div class="modal-body">
-          <div class="hotkeys-list">
-            <div v-for="(h, i) in HOTKEYS" :key="i" class="hotkeys-row">
-              <div class="hotkeys-keys">
-                <kbd v-for="(k, j) in h.keys" :key="j" class="hotkeys-kbd">{{ k }}</kbd>
-              </div>
-              <div class="hotkeys-desc">{{ h.desc }}</div>
-            </div>
-          </div>
-          <div class="hotkeys-note">
-            <b>提示：</b>带 <code class="mono">g</code> 前缀的是两步序列——
-            先按 <kbd class="hotkeys-kbd-inline">g</kbd>，再按对应字母（1.2 秒内）。
-            输入框内不会触发任何快捷键，避免打字时误触。
-          </div>
-        </div>
-        <div class="modal-foot">
-          <button class="btn btn-primary" @click="close">知道了</button>
-        </div>
+        <div class="hotkeys-desc">{{ h.desc }}</div>
       </div>
     </div>
-  </Teleport>
+    <div class="hotkeys-note">
+      <b>提示：</b>带 <code class="mono">g</code> 前缀的是两步序列——
+      先按 <kbd class="hotkeys-kbd-inline">g</kbd>，再按对应字母（1.2 秒内）。
+      输入框内不会触发任何快捷键，避免打字时误触。
+    </div>
+    <template #footer>
+      <button class="btn btn-primary" @click="close">知道了</button>
+    </template>
+  </Modal>
 </template>
 
 <style scoped>

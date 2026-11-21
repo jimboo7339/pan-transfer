@@ -233,91 +233,81 @@ async function removeAcc(acc) {
     </div>
 
     <!-- 添加/编辑账号 -->
-    <Teleport to="body">
-      <div v-if="showEdit" class="modal-overlay" @mousedown.self="showEdit = false">
-        <div class="modal">
-          <div class="modal-head">
-            <div class="modal-title">{{ isEdit ? '编辑账号' : '添加账号' }}</div>
-            <button class="modal-close" @click="showEdit = false">✕</button>
-          </div>
-          <div class="modal-body">
-            <div class="field" v-if="!isEdit">
-              <div class="field-label">网盘类型</div>
-              <div class="flex" style="gap: 10px">
-                <div v-for="d in drivers" :key="d.name" @click="form.driver_type = d.name; onDriverChange()"
-                  style="flex: 1; padding: 12px; border-radius: 10px; border: 1.5px solid var(--border); cursor: pointer; transition: all .15s"
-                  :style="form.driver_type === d.name ? 'border-color: var(--primary); background: var(--primary-soft)' : ''">
-                  <div class="flex" style="gap: 8px">
-                    <div style="width: 26px; height: 26px; border-radius: 7px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 12px"
-                      :style="{ background: d.card_color || '#8a93a6' }">{{ d.display_name?.slice(0, 1) }}</div>
-                    <div style="font-weight: 600; font-size: 13.5px">{{ d.display_name }}</div>
-                  </div>
-                  <div class="flex" style="gap: 4px; margin-top: 8px; flex-wrap: wrap">
-                    <span v-for="t in d.card_tags" :key="t" class="tag" style="font-size: 10.5px; height: 18px">{{ t }}</span>
-                  </div>
-                </div>
-              </div>
+    <Modal v-model="showEdit" :title="isEdit ? '编辑账号' : '添加账号'">
+      <div class="field" v-if="!isEdit">
+        <div class="field-label">网盘类型</div>
+        <div class="flex" style="gap: 10px">
+          <div v-for="d in drivers" :key="d.name" @click="form.driver_type = d.name; onDriverChange()"
+            style="flex: 1; padding: 12px; border-radius: 10px; border: 1.5px solid var(--border); cursor: pointer; transition: all .15s"
+            :style="form.driver_type === d.name ? 'border-color: var(--primary); background: var(--primary-soft)' : ''">
+            <div class="flex" style="gap: 8px">
+              <div style="width: 26px; height: 26px; border-radius: 7px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 12px"
+                :style="{ background: d.card_color || '#8a93a6' }">{{ d.display_name?.slice(0, 1) }}</div>
+              <div style="font-weight: 600; font-size: 13.5px">{{ d.display_name }}</div>
             </div>
-            <div class="field">
-              <div class="field-label">账号名称 <span class="req">*</span></div>
-              <input class="input" v-model="form.name" placeholder="例如：夸克主号 / 光鸭小号" />
+            <div class="flex" style="gap: 4px; margin-top: 8px; flex-wrap: wrap">
+              <span v-for="t in d.card_tags" :key="t" class="tag" style="font-size: 10.5px; height: 18px">{{ t }}</span>
             </div>
-
-            <template v-for="f in currentDriver?.fields || []" :key="f.name">
-              <div class="field">
-                <div class="field-label">
-                  {{ f.label }}
-                  <span v-if="isEdit && secretSet[f.name]" class="tag secret-tag" title="该凭据已加密保存，留空表示不修改">
-                    🔒 已保存
-                  </span>
-                </div>
-                <select v-if="f.type === 'select'" class="select" v-model="fieldValues[f.name]">
-                  <option v-for="o in f.options" :key="o.value" :value="o.value">{{ o.label }}</option>
-                </select>
-                <input v-else class="input" :class="{ mono: f.type !== 'password' }"
-                  :type="f.type === 'password' ? 'password' : 'text'"
-                  v-model="fieldValues[f.name]"
-                  :placeholder="f.type === 'password' && isEdit && secretSet[f.name]
-                    ? '已保存，留空表示不修改'
-                    : (f.default || '')" />
-                <div v-if="f.type === 'password' && isEdit && secretSet[f.name]" class="field-hint">
-                  凭据加密存储，界面与接口都不会回显明文；需要更换时直接填写新值。
-                </div>
-              </div>
-            </template>
-
-            <div v-if="isEdit" class="field">
-              <label class="checkbox">
-                <input type="checkbox" :checked="form.is_active"
-                  @change="form.is_active = $event.target.checked" />
-                启用该账号
-              </label>
-              <div class="field-hint">
-                停用后该账号下的任务不会被调度（仍可手动运行，但会报账号不可用）。
-              </div>
-            </div>
-
-            <div v-if="currentDriver?.qr_login" class="card card-pad" style="background: var(--surface-2); border-style: dashed">
-              <div class="flex">
-                <div class="flex-1">
-                  <div style="font-weight: 600; font-size: 13.5px">扫码登录</div>
-                  <div class="field-hint" style="margin-top: 4px">不想手动抓 Cookie / Token？用网盘 App 扫码自动获取。</div>
-                </div>
-                <button class="btn btn-primary" @click="qrRef.open(form.driver_type)">📱 扫码登录</button>
-              </div>
-            </div>
-          </div>
-          <div class="modal-foot">
-            <span class="flex-1"></span>
-            <button class="btn" @click="showEdit = false">取消</button>
-            <button class="btn btn-primary" :disabled="saving" @click="save">
-              <span v-if="saving" class="spinner" style="border-top-color: #fff"></span>
-              <span v-else>{{ isEdit ? '保存' : '添加并验证' }}</span>
-            </button>
           </div>
         </div>
       </div>
-    </Teleport>
+      <div class="field">
+        <div class="field-label">账号名称 <span class="req">*</span></div>
+        <input class="input" v-model="form.name" placeholder="例如：夸克主号 / 光鸭小号" />
+      </div>
+
+      <template v-for="f in currentDriver?.fields || []" :key="f.name">
+        <div class="field">
+          <div class="field-label">
+            {{ f.label }}
+            <span v-if="isEdit && secretSet[f.name]" class="tag secret-tag" title="该凭据已加密保存，留空表示不修改">
+              🔒 已保存
+            </span>
+          </div>
+          <select v-if="f.type === 'select'" class="select" v-model="fieldValues[f.name]">
+            <option v-for="o in f.options" :key="o.value" :value="o.value">{{ o.label }}</option>
+          </select>
+          <input v-else class="input" :class="{ mono: f.type !== 'password' }"
+            :type="f.type === 'password' ? 'password' : 'text'"
+            v-model="fieldValues[f.name]"
+            :placeholder="f.type === 'password' && isEdit && secretSet[f.name]
+              ? '已保存，留空表示不修改'
+              : (f.default || '')" />
+          <div v-if="f.type === 'password' && isEdit && secretSet[f.name]" class="field-hint">
+            凭据加密存储，界面与接口都不会回显明文；需要更换时直接填写新值。
+          </div>
+        </div>
+      </template>
+
+      <div v-if="isEdit" class="field">
+        <label class="checkbox">
+          <input type="checkbox" :checked="form.is_active"
+            @change="form.is_active = $event.target.checked" />
+          启用该账号
+        </label>
+        <div class="field-hint">
+          停用后该账号下的任务不会被调度（仍可手动运行，但会报账号不可用）。
+        </div>
+      </div>
+
+      <div v-if="currentDriver?.qr_login" class="card card-pad" style="background: var(--surface-2); border-style: dashed">
+        <div class="flex">
+          <div class="flex-1">
+            <div style="font-weight: 600; font-size: 13.5px">扫码登录</div>
+            <div class="field-hint" style="margin-top: 4px">不想手动抓 Cookie / Token？用网盘 App 扫码自动获取。</div>
+          </div>
+          <button class="btn btn-primary" @click="qrRef.open(form.driver_type)">📱 扫码登录</button>
+        </div>
+      </div>
+
+      <template #footer>
+        <button class="btn" @click="showEdit = false">取消</button>
+        <button class="btn btn-primary" :disabled="saving" @click="save">
+          <span v-if="saving" class="spinner" style="border-top-color: #fff"></span>
+          <span v-else>{{ isEdit ? '保存' : '添加并验证' }}</span>
+        </button>
+      </template>
+    </Modal>
 
     <QRLogin ref="qrRef" @success="onQRSuccess" />
   </div>

@@ -271,14 +271,7 @@ async function save() {
 </script>
 
 <template>
-  <Teleport to="body">
-    <div v-if="visible" class="modal-overlay" @mousedown.self="close">
-      <div class="modal modal-lg">
-        <div class="modal-head">
-          <div class="modal-title">{{ isEdit ? '编辑转存任务' : '新建转存任务' }}</div>
-          <button class="modal-close" aria-label="关闭" @click="close">✕</button>
-        </div>
-        <div class="modal-body">
+  <Modal v-model="visible" size="lg" :title="isEdit ? '编辑转存任务' : '新建转存任务'">
           <!-- 基础信息 -->
           <div class="modal-section" style="border-top: none; margin-top: -20px; padding-top: 0">
             <div class="modal-section-title">基础信息</div>
@@ -450,19 +443,16 @@ async function save() {
               <div class="field-hint" style="margin-top: 8px">常用：每 2 小时 <code class="mono">0 */2 * * *</code>；每天 08:00 <code class="mono">0 8 * * *</code>；周一/五 20:30 <code class="mono">30 20 * * 1,5</code>。到点后有 1–3 分钟随机延迟，降低风控风险。</div>
             </template>
           </div>
-        </div>
-        <div class="modal-foot">
-          <span class="flex-1"></span>
-          <button class="btn" @click="close">取消</button>
-          <button class="btn btn-primary" :disabled="saving" @click="save">
-            <span v-if="saving" class="spinner" style="border-top-color: #fff"></span>
-            <span v-else>{{ isEdit ? '保存修改' : '创建任务' }}</span>
-          </button>
-        </div>
-      </div>
-    </div>
+      <template #footer>
+        <span class="flex-1"></span>
+        <button class="btn" @click="close">取消</button>
+        <button class="btn btn-primary" :disabled="saving" @click="save">
+          <span v-if="saving" class="spinner" style="border-top-color: #fff"></span>
+          <span v-else>{{ isEdit ? '保存修改' : '创建任务' }}</span>
+        </button>
+      </template>
+  </Modal>
 
-    <SharePreview ref="previewRef" @use-folder="onUseFolder" />
-    <FileBrowser ref="browserRef" @picked="onPickPath" />
-  </Teleport>
+  <SharePreview ref="previewRef" @use-folder="onUseFolder" />
+  <FileBrowser ref="browserRef" @picked="onPickPath" />
 </template>

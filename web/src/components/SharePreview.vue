@@ -147,34 +147,30 @@ function useCurrentFolder() {
 </script>
 
 <template>
-  <Teleport to="body">
-    <div v-if="visible" class="modal-overlay" @mousedown.self="visible = false">
-      <div class="modal modal-xl">
-        <div class="modal-head">
-          <div class="modal-title">分享链接预览 <span class="muted" style="font-size: 13px; font-weight: 400">（共 {{ total }} 个文件）</span></div>
-          <button class="modal-close" @click="visible = false">✕</button>
-        </div>
-        <div class="modal-body" style="padding-top: 14px">
-          <div class="flex mb-16" style="justify-content: space-between; flex-wrap: wrap">
-            <div class="dir-crumb">
-              <a @click="jumpTo(-1)">🏠 根目录</a>
-              <template v-for="(t, i) in trail" :key="i">
-                <span class="muted">/</span>
-                <a @click="jumpTo(i)">{{ t.name }}</a>
-              </template>
-              <span class="muted">/</span>
-              <span class="cur">{{ curDirName }}</span>
-            </div>
-            <div class="flex" style="gap: 8px; align-items: center">
-              <span class="field-hint" style="margin-top: 0">仅影响当前这条链接</span>
-              <button class="btn btn-primary btn-sm" @click="useCurrentFolder">📌 只转存当前文件夹</button>
-            </div>
-          </div>
+  <Modal v-model="visible" size="xl" title="分享链接预览">
+    <template #title>
+      分享链接预览 <span class="muted" style="font-size: 13px; font-weight: 400">（共 {{ total }} 个文件）</span>
+    </template>
+    <div class="flex mb-16" style="justify-content: space-between; flex-wrap: wrap">
+      <div class="dir-crumb">
+        <a @click="jumpTo(-1)">🏠 根目录</a>
+        <template v-for="(t, i) in trail" :key="i">
+          <span class="muted">/</span>
+          <a @click="jumpTo(i)">{{ t.name }}</a>
+        </template>
+        <span class="muted">/</span>
+        <span class="cur">{{ curDirName }}</span>
+      </div>
+      <div class="flex" style="gap: 8px; align-items: center">
+        <span class="field-hint" style="margin-top: 0">仅影响当前这条链接</span>
+        <button class="btn btn-primary btn-sm" @click="useCurrentFolder">📌 只转存当前文件夹</button>
+      </div>
+    </div>
 
-          <!-- 转存状态统计与筛选：已转存 / 待转存一目了然 -->
-          <div v-if="!loadError && items.length" class="flex mb-16" style="gap: 8px; flex-wrap: wrap; align-items: center">
-            <span class="badge badge-primary">待转存 {{ stats.todo }}</span>
-            <span class="badge badge-success">已转存 {{ stats.saved }}</span>
+    <!-- 转存状态统计与筛选：已转存 / 待转存一目了然 -->
+    <div v-if="!loadError && items.length" class="flex mb-16" style="gap: 8px; flex-wrap: wrap; align-items: center">
+      <span class="badge badge-primary">待转存 {{ stats.todo }}</span>
+      <span class="badge badge-success">已转存 {{ stats.saved }}</span>
             <span v-if="stats.skip" class="badge badge-gray">起始前 {{ stats.skip }}</span>
             <span v-if="stats.conflict" class="badge badge-warn">重命名冲突 {{ stats.conflict }}</span>
             <span class="flex-1"></span>
@@ -262,13 +258,6 @@ function useCurrentFolder() {
             <button class="btn btn-sm" :disabled="page >= pageCount" @click="goPage(page + 1)">下一页</button>
             <button class="btn btn-sm" :disabled="page >= pageCount" @click="goPage(pageCount)">»</button>
           </div>
-          <div v-if="truncated" class="field-hint mt-8">⚠ 条目过多，仅展示前 {{ items.length }} 项（原 {{ total }} 项）。</div>
-        </div>
-        <div class="modal-foot">
-          <span class="flex-1"></span>
-          <button class="btn" @click="visible = false">关闭</button>
-        </div>
-      </div>
-    </div>
-  </Teleport>
+        <div v-if="truncated" class="field-hint mt-8">⚠ 条目过多，仅展示前 {{ items.length }} 项（原 {{ total }} 项）。</div>
+  </Modal>
 </template>

@@ -625,235 +625,193 @@ const newestBackup = computed(() => backups.value[0] || null)
     <ConfigTransfer ref="configRef" />
 
     <!-- 渠道编辑 -->
-    <Teleport to="body">
-      <div v-if="showChannel" class="modal-overlay" @mousedown.self="showChannel = false">
-        <div class="modal">
-          <div class="modal-head">
-            <div class="modal-title">{{ editingChannel ? '编辑通知渠道' : '添加通知渠道' }}</div>
-            <button class="modal-close" @click="showChannel = false">✕</button>
-          </div>
-          <div class="modal-body">
-            <div class="form-row">
-              <div class="field">
-                <div class="field-label">渠道类型</div>
-                <select class="select" v-model="chForm.type" :disabled="editingChannel" @change="onTypeChange">
-                  <option v-for="t in channelTypes" :key="t.value" :value="t.value">{{ t.label }}</option>
-                </select>
-              </div>
-              <div class="field">
-                <div class="field-label">渠道名称 <span class="req">*</span></div>
-                <input class="input" v-model="chForm.name" placeholder="例如：我的 Telegram" />
-              </div>
-            </div>
-            <div v-for="f in channelFields[chForm.type] || []" :key="f.key" class="field">
-              <div class="field-label">{{ f.label }}</div>
-              <input class="input mono" v-model="chForm.config[f.key]" :placeholder="f.ph || ''" />
-            </div>
-            <label class="checkbox">
-              <input type="checkbox" v-model="chForm.enabled" />
-              启用该渠道
-            </label>
-          </div>
-          <div class="modal-foot">
-            <button class="btn" :disabled="testingChannel" @click="testChannel">
-              <span v-if="testingChannel" class="spinner"></span>
-              <span v-else>发送测试消息</span>
-            </button>
-            <span class="flex-1"></span>
-            <button class="btn" @click="showChannel = false">取消</button>
-            <button class="btn btn-primary" :disabled="saving" @click="saveChannel">保存</button>
-          </div>
+    <Modal v-model="showChannel" :title="editingChannel ? '编辑通知渠道' : '添加通知渠道'">
+      <div class="form-row">
+        <div class="field">
+          <div class="field-label">渠道类型</div>
+          <select class="select" v-model="chForm.type" :disabled="editingChannel" @change="onTypeChange">
+            <option v-for="t in channelTypes" :key="t.value" :value="t.value">{{ t.label }}</option>
+          </select>
+        </div>
+        <div class="field">
+          <div class="field-label">渠道名称 <span class="req">*</span></div>
+          <input class="input" v-model="chForm.name" placeholder="例如：我的 Telegram" />
         </div>
       </div>
+      <div v-for="f in channelFields[chForm.type] || []" :key="f.key" class="field">
+        <div class="field-label">{{ f.label }}</div>
+        <input class="input mono" v-model="chForm.config[f.key]" :placeholder="f.ph || ''" />
+      </div>
+      <label class="checkbox">
+        <input type="checkbox" v-model="chForm.enabled" />
+        启用该渠道
+      </label>
+      <template #footer>
+        <button class="btn" :disabled="testingChannel" @click="testChannel">
+          <span v-if="testingChannel" class="spinner"></span>
+          <span v-else>发送测试消息</span>
+        </button>
+        <span class="flex-1"></span>
+        <button class="btn" @click="showChannel = false">取消</button>
+        <button class="btn btn-primary" :disabled="saving" @click="saveChannel">保存</button>
+      </template>
+    </Modal>
 
-      <!-- 密码 -->
-      <div v-if="pwdModal" class="modal-overlay" @mousedown.self="pwdModal = false">
-        <div class="modal" style="width: 400px">
-          <div class="modal-head">
-            <div class="modal-title">{{ settings.auth_enabled ? '修改访问密码' : '设置访问密码' }}</div>
-            <button class="modal-close" @click="pwdModal = false">✕</button>
-          </div>
-          <div class="modal-body">
-            <div class="field">
-              <div class="field-label">新密码（至少 4 位）</div>
-              <input class="input" type="password" v-model="pwd" />
-            </div>
-            <div class="field">
-              <div class="field-label">确认密码</div>
-              <input class="input" type="password" v-model="pwd2" @keyup.enter="savePassword" />
-            </div>
-          </div>
-          <div class="modal-foot">
-            <button class="btn" @click="pwdModal = false">取消</button>
-            <button class="btn btn-primary" @click="savePassword">保存</button>
-          </div>
-        </div>
+    <!-- 密码 -->
+    <Modal v-model="pwdModal" :title="settings.auth_enabled ? '修改访问密码' : '设置访问密码'">
+      <div class="field">
+        <div class="field-label">新密码（至少 4 位）</div>
+        <input class="input" type="password" v-model="pwd" />
       </div>
+      <div class="field">
+        <div class="field-label">确认密码</div>
+        <input class="input" type="password" v-model="pwd2" @keyup.enter="savePassword" />
+      </div>
+      <template #footer>
+        <button class="btn" @click="pwdModal = false">取消</button>
+        <button class="btn btn-primary" @click="savePassword">保存</button>
+      </template>
+    </Modal>
 
       <!-- 分类编辑 -->
-      <div v-if="showCatEdit" class="modal-overlay" @mousedown.self="showCatEdit = false">
-        <div class="modal modal-lg">
-          <div class="modal-head">
-            <div class="modal-title">{{ editingCat ? '编辑分类' : '添加分类' }}</div>
-            <button class="modal-close" @click="showCatEdit = false">✕</button>
+      <Modal v-model="showCatEdit" size="lg"
+        :title="editingCat ? '编辑分类' : '添加分类'">
+        <div class="form-row">
+          <div class="field">
+            <div class="field-label">分类名称 <span class="req">*</span></div>
+            <input class="input" v-model="catForm.name" placeholder="例如：Emby 刮削刷新" />
           </div>
-          <div class="modal-body">
-            <div class="form-row">
-              <div class="field">
-                <div class="field-label">分类名称 <span class="req">*</span></div>
-                <input class="input" v-model="catForm.name" placeholder="例如：Emby 刮削刷新" />
-              </div>
-              <div class="field">
-                <div class="field-label">回调超时（秒）</div>
-                <input class="input" type="number" min="1" max="120" v-model="catForm.callback_timeout_sec" />
-              </div>
-            </div>
-            <label class="checkbox">
-              <input type="checkbox" v-model="catForm.callback_enabled" />
-              启用回调（关闭则仅作为任务分组，不调用接口）
-            </label>
-            <label class="checkbox" v-if="catForm.callback_enabled">
-              <input type="checkbox" v-model="catForm.skip_zero" />
-              0 转存不回调（本次没有任何新文件且无失败时不调用接口；有失败仍会回调）
-            </label>
-            <template v-if="catForm.callback_enabled">
-              <div class="form-row">
-                <div class="field">
-                  <div class="field-label">触发时机</div>
-                  <select class="select" v-model="catForm.callback_mode">
-                    <option value="round">分类轮次完成（该类任务一批跑完后回调一次，汇总结果）</option>
-                    <option value="per_task">单任务完成（每个任务转存完成即回调）</option>
-                  </select>
-                </div>
-                <div class="field">
-                  <div class="field-label">请求方法</div>
-                  <select class="select" v-model="catForm.callback_method">
-                    <option value="POST">POST（Body 模板）</option>
-                    <option value="GET">GET（参数在 URL 上）</option>
-                  </select>
-                </div>
-              </div>
-              <div class="field">
-                <div class="field-label">回调 URL <span class="req" v-if="catForm.callback_enabled">*</span>
-                  <span class="flex-1"></span>
-                  <span class="field-hint" style="margin-top: 0">支持 {变量}，GET 查询值自动 URL 编码；<a style="color: var(--primary); cursor: pointer" @click="showCatHelp = true">查看变量表</a></span>
-                </div>
-                <input class="input mono" v-model="catForm.callback_url"
-                  :placeholder="catForm.callback_method === 'GET' ? 'http://192.168.1.10:8080/api/refresh?dir={save_path}&count={transfer_count}' : 'http://192.168.1.10:8080/api/hook'" />
-              </div>
-              <div class="field">
-                <div class="field-label">自定义请求头（JSON，可选）</div>
-                <input class="input mono" v-model="catForm.callback_headers" placeholder='{"Authorization": "Bearer xxx"}' />
-              </div>
-              <div class="field" v-if="catForm.callback_method === 'POST'">
-                <div class="field-label">Body 模板（留空用默认模板）</div>
-                <textarea class="textarea mono" rows="5" v-model="catForm.callback_body"
-                  placeholder='{"event":"transfer.completed","category":"{category}","status":"{status}","count":{transfer_count},"files":{transferred_files_json},"path":"{save_path}"}'></textarea>
-              </div>
-              <div v-if="catTestResult" class="card card-pad" style="padding: 10px 12px; font-size: 12.5px"
-                :style="catTestResult.ok ? 'background: var(--success-soft)' : 'background: var(--danger-soft)'">
-                <div style="font-weight: 600">{{ catTestResult.ok ? '✅ 测试成功' : '❌ 测试失败' }}
-                  <span v-if="catTestResult.status_code" class="muted">HTTP {{ catTestResult.status_code }}</span></div>
-                <div class="mono" style="margin-top: 4px; overflow-wrap: anywhere; color: var(--text-2)">{{ catTestResult.response || catTestResult.error }}</div>
-              </div>
-            </template>
-          </div>
-          <div class="modal-foot">
-            <button v-if="catForm.id" class="btn" :disabled="testingCat" @click="testCat">
-              <span v-if="testingCat" class="spinner"></span>
-              <span v-else>发送测试</span>
-            </button>
-            <span v-if="!catForm.id" class="field-hint" style="margin-top: 0">保存后可发送测试</span>
-            <span class="flex-1"></span>
-            <button class="btn" @click="showCatEdit = false">取消</button>
-            <button class="btn btn-primary" :disabled="savingCat" @click="saveCat">保存</button>
+          <div class="field">
+            <div class="field-label">回调超时（秒）</div>
+            <input class="input" type="number" min="1" max="120" v-model="catForm.callback_timeout_sec" />
           </div>
         </div>
-      </div>
+        <label class="checkbox">
+          <input type="checkbox" v-model="catForm.callback_enabled" />
+          启用回调（关闭则仅作为任务分组，不调用接口）
+        </label>
+        <label class="checkbox" v-if="catForm.callback_enabled">
+          <input type="checkbox" v-model="catForm.skip_zero" />
+          0 转存不回调（本次没有任何新文件且无失败时不调用接口；有失败仍会回调）
+        </label>
+        <template v-if="catForm.callback_enabled">
+          <div class="form-row">
+            <div class="field">
+              <div class="field-label">触发时机</div>
+              <select class="select" v-model="catForm.callback_mode">
+                <option value="round">分类轮次完成（该类任务一批跑完后回调一次，汇总结果）</option>
+                <option value="per_task">单任务完成（每个任务转存完成即回调）</option>
+              </select>
+            </div>
+            <div class="field">
+              <div class="field-label">请求方法</div>
+              <select class="select" v-model="catForm.callback_method">
+                <option value="POST">POST（Body 模板）</option>
+                <option value="GET">GET（参数在 URL 上）</option>
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <div class="field-label">回调 URL <span class="req" v-if="catForm.callback_enabled">*</span>
+              <span class="flex-1"></span>
+              <span class="field-hint" style="margin-top: 0">支持 {变量}，GET 查询值自动 URL 编码；<a style="color: var(--primary); cursor: pointer" @click="showCatHelp = true">查看变量表</a></span>
+            </div>
+            <input class="input mono" v-model="catForm.callback_url"
+              :placeholder="catForm.callback_method === 'GET' ? 'http://192.168.1.10:8080/api/refresh?dir={save_path}&count={transfer_count}' : 'http://192.168.1.10:8080/api/hook'" />
+          </div>
+          <div class="field">
+            <div class="field-label">自定义请求头（JSON，可选）</div>
+            <input class="input mono" v-model="catForm.callback_headers" placeholder='{"Authorization": "Bearer xxx"}' />
+          </div>
+          <div class="field" v-if="catForm.callback_method === 'POST'">
+            <div class="field-label">Body 模板（留空用默认模板）</div>
+            <textarea class="textarea mono" rows="5" v-model="catForm.callback_body"
+              placeholder='{"event":"transfer.completed","category":"{category}","status":"{status}","count":{transfer_count},"files":{transferred_files_json},"path":"{save_path}"}'></textarea>
+          </div>
+          <div v-if="catTestResult" class="card card-pad" style="padding: 10px 12px; font-size: 12.5px"
+            :style="catTestResult.ok ? 'background: var(--success-soft)' : 'background: var(--danger-soft)'">
+            <div style="font-weight: 600">{{ catTestResult.ok ? '✅ 测试成功' : '❌ 测试失败' }}
+              <span v-if="catTestResult.status_code" class="muted">HTTP {{ catTestResult.status_code }}</span></div>
+            <div class="mono" style="margin-top: 4px; overflow-wrap: anywhere; color: var(--text-2)">{{ catTestResult.response || catTestResult.error }}</div>
+          </div>
+        </template>
+        <template #footer>
+          <button v-if="catForm.id" class="btn" :disabled="testingCat" @click="testCat">
+            <span v-if="testingCat" class="spinner"></span>
+            <span v-else>发送测试</span>
+          </button>
+          <span v-if="!catForm.id" class="field-hint" style="margin-top: 0">保存后可发送测试</span>
+          <span class="flex-1"></span>
+          <button class="btn" @click="showCatEdit = false">取消</button>
+          <button class="btn btn-primary" :disabled="savingCat" @click="saveCat">保存</button>
+        </template>
+      </Modal>
 
       <!-- 回调日志 -->
-      <div v-if="showCatLogs" class="modal-overlay" @mousedown.self="showCatLogs = false">
-        <div class="modal modal-lg">
-          <div class="modal-head">
-            <div class="modal-title">「{{ logsCat?.name }}」回调日志</div>
-            <button class="modal-close" @click="showCatLogs = false">✕</button>
-          </div>
-          <div class="modal-body">
-            <div v-if="catLogsLoading" class="loading-block"><span class="spinner"></span></div>
-            <div v-else-if="!catLogs.length" class="empty">
-              <div class="empty-title">还没有回调记录</div>
-              <div class="empty-hint">分类回调触发后会在这里记录每次调用的结果</div>
+      <Modal v-model="showCatLogs" size="lg" :title="`「${logsCat?.name || ''}」回调日志`">
+        <div v-if="catLogsLoading" class="loading-block"><span class="spinner"></span></div>
+        <div v-else-if="!catLogs.length" class="empty">
+          <div class="empty-title">还没有回调记录</div>
+          <div class="empty-hint">分类回调触发后会在这里记录每次调用的结果</div>
+        </div>
+        <div v-else style="display: flex; flex-direction: column; gap: 8px">
+          <div v-for="l in catLogs" :key="l.id" class="card card-pad" style="padding: 10px 12px">
+            <div class="flex" style="flex-wrap: wrap; gap: 6px">
+              <span class="badge" :class="l.ok ? 'badge-success' : 'badge-danger'"><span class="dot"></span>{{ l.ok ? '成功' : '失败' }}</span>
+              <span v-if="l.status_code" class="badge badge-gray">HTTP {{ l.status_code }}</span>
+              <span class="tag">{{ l.kind === 'round' ? '轮次' : l.kind === 'test' ? '测试' : '单任务' }}</span>
+              <span class="muted" style="font-size: 12px">{{ fmtTime(l.created_at) }}</span>
             </div>
-            <div v-else style="display: flex; flex-direction: column; gap: 8px">
-              <div v-for="l in catLogs" :key="l.id" class="card card-pad" style="padding: 10px 12px">
-                <div class="flex" style="flex-wrap: wrap; gap: 6px">
-                  <span class="badge" :class="l.ok ? 'badge-success' : 'badge-danger'"><span class="dot"></span>{{ l.ok ? '成功' : '失败' }}</span>
-                  <span v-if="l.status_code" class="badge badge-gray">HTTP {{ l.status_code }}</span>
-                  <span class="tag">{{ l.kind === 'round' ? '轮次' : l.kind === 'test' ? '测试' : '单任务' }}</span>
-                  <span class="muted" style="font-size: 12px">{{ fmtTime(l.created_at) }}</span>
-                </div>
-                <div class="mono ellipsis" style="font-size: 11.5px; margin-top: 6px" :title="l.target">{{ l.target }}</div>
-                <pre v-if="l.response" class="log-tree" style="margin-top: 6px; max-height: 120px; padding: 8px 10px">{{ l.response }}</pre>
-              </div>
-            </div>
-          </div>
-          <div class="modal-foot">
-            <span class="flex-1"></span>
-            <button class="btn" @click="showCatLogs = false">关闭</button>
+            <div class="mono ellipsis" style="font-size: 11.5px; margin-top: 6px" :title="l.target">{{ l.target }}</div>
+            <pre v-if="l.response" class="log-tree" style="margin-top: 6px; max-height: 120px; padding: 8px 10px">{{ l.response }}</pre>
           </div>
         </div>
-      </div>
+        <template #footer>
+          <span class="flex-1"></span>
+          <button class="btn" @click="showCatLogs = false">关闭</button>
+        </template>
+      </Modal>
 
       <!-- 分类回调使用说明 -->
-      <div v-if="showCatHelp" class="modal-overlay" @mousedown.self="showCatHelp = false">
-        <div class="modal modal-lg">
-          <div class="modal-head">
-            <div class="modal-title">任务分类与回调 · 使用说明</div>
-            <button class="modal-close" @click="showCatHelp = false">✕</button>
+      <Modal v-model="showCatHelp" size="lg" title="任务分类与回调 · 使用说明">
+        <div style="font-size: 13.5px; line-height: 1.8; color: var(--text-2)">
+          <p style="margin: 0 0 10px"><b style="color: var(--text)">这是什么：</b>把任务归入分类，转存完成后自动按分类配置调用你的接口，让其他系统（媒体库刷新、字幕下载、文件整理脚本…）接着处理文件。</p>
+          <p style="margin: 0 0 10px"><b style="color: var(--text)">触发时机：</b></p>
+          <ul style="margin: 0 0 10px; padding-left: 20px">
+            <li><b>单任务完成</b>：该分类下每个任务转存完成就回调一次，参数里带这个任务的结果。</li>
+            <li><b>分类轮次完成</b>：一批定时触发（或一次手动运行）中，该分类全部已启动任务都结束后回调<b>一次</b>，参数汇总每个任务的结果。定时批量任务间有 1–3 分钟随机延迟，轮次会等齐再回调。</li>
+          </ul>
+          <p style="margin: 0 0 10px"><b style="color: var(--text)">可用变量（URL 和 Body 模板里用 <code class="mono">{变量名}</code> 引用）：</b></p>
+          <div class="table-wrap" style="margin-bottom: 10px">
+            <table class="table">
+              <thead><tr><th style="width: 190px">变量</th><th>说明</th></tr></thead>
+              <tbody>
+                <tr><td class="mono">{task_name}</td><td>任务名称（轮次模式下无单一任务概念，用 task_results_json）</td></tr>
+                <tr><td class="mono">{task_id}</td><td>任务 ID</td></tr>
+                <tr><td class="mono">{category}</td><td>分类名称</td></tr>
+                <tr><td class="mono">{status}</td><td>success / partial / failed（轮次模式为汇总状态）</td></tr>
+                <tr><td class="mono">{transfer_count}</td><td>本次新转存文件数</td></tr>
+                <tr><td class="mono">{transferred_files_json}</td><td>新文件名 JSON 数组，如 ["a.mkv","b.mkv"]</td></tr>
+                <tr><td class="mono">{transferred_files}</td><td>新文件名，换行分隔</td></tr>
+                <tr><td class="mono">{save_path}</td><td>保存路径</td></tr>
+                <tr><td class="mono">{trigger}</td><td>manual（手动）/ schedule（定时）</td></tr>
+                <tr><td class="mono">{finished_at}</td><td>完成时间</td></tr>
+                <tr><td class="mono">{message}</td><td>结果摘要（如「转存 3 个文件」）</td></tr>
+                <tr><td class="mono">{task_results_json}</td><td>仅轮次模式：每个任务结果的 JSON 数组</td></tr>
+                <tr><td class="mono">{round_id} / {task_count} / {total_transferred}</td><td>仅轮次模式：轮次 ID / 任务数 / 总转存数</td></tr>
+              </tbody>
+            </table>
           </div>
-          <div class="modal-body">
-            <div style="font-size: 13.5px; line-height: 1.8; color: var(--text-2)">
-              <p style="margin: 0 0 10px"><b style="color: var(--text)">这是什么：</b>把任务归入分类，转存完成后自动按分类配置调用你的接口，让其他系统（媒体库刷新、字幕下载、文件整理脚本…）接着处理文件。</p>
-              <p style="margin: 0 0 10px"><b style="color: var(--text)">触发时机：</b></p>
-              <ul style="margin: 0 0 10px; padding-left: 20px">
-                <li><b>单任务完成</b>：该分类下每个任务转存完成就回调一次，参数里带这个任务的结果。</li>
-                <li><b>分类轮次完成</b>：一批定时触发（或一次手动运行）中，该分类全部已启动任务都结束后回调<b>一次</b>，参数汇总每个任务的结果。定时批量任务间有 1–3 分钟随机延迟，轮次会等齐再回调。</li>
-              </ul>
-              <p style="margin: 0 0 10px"><b style="color: var(--text)">可用变量（URL 和 Body 模板里用 <code class="mono">{变量名}</code> 引用）：</b></p>
-              <div class="table-wrap" style="margin-bottom: 10px">
-                <table class="table">
-                  <thead><tr><th style="width: 190px">变量</th><th>说明</th></tr></thead>
-                  <tbody>
-                    <tr><td class="mono">{task_name}</td><td>任务名称（轮次模式下无单一任务概念，用 task_results_json）</td></tr>
-                    <tr><td class="mono">{task_id}</td><td>任务 ID</td></tr>
-                    <tr><td class="mono">{category}</td><td>分类名称</td></tr>
-                    <tr><td class="mono">{status}</td><td>success / partial / failed（轮次模式为汇总状态）</td></tr>
-                    <tr><td class="mono">{transfer_count}</td><td>本次新转存文件数</td></tr>
-                    <tr><td class="mono">{transferred_files_json}</td><td>新文件名 JSON 数组，如 ["a.mkv","b.mkv"]</td></tr>
-                    <tr><td class="mono">{transferred_files}</td><td>新文件名，换行分隔</td></tr>
-                    <tr><td class="mono">{save_path}</td><td>保存路径</td></tr>
-                    <tr><td class="mono">{trigger}</td><td>manual（手动）/ schedule（定时）</td></tr>
-                    <tr><td class="mono">{finished_at}</td><td>完成时间</td></tr>
-                    <tr><td class="mono">{message}</td><td>结果摘要（如「转存 3 个文件」）</td></tr>
-                    <tr><td class="mono">{task_results_json}</td><td>仅轮次模式：每个任务结果的 JSON 数组</td></tr>
-                    <tr><td class="mono">{round_id} / {task_count} / {total_transferred}</td><td>仅轮次模式：轮次 ID / 任务数 / 总转存数</td></tr>
-                  </tbody>
-                </table>
-              </div>
-              <p style="margin: 0 0 10px"><b style="color: var(--text)">示例：</b></p>
-              <pre class="log-tree" style="margin-bottom: 10px">GET  http://192.168.1.10:8080/api/refresh?dir={save_path}&amp;count={transfer_count}
+          <p style="margin: 0 0 10px"><b style="color: var(--text)">示例：</b></p>
+          <pre class="log-tree" style="margin-bottom: 10px">GET  http://192.168.1.10:8080/api/refresh?dir={save_path}&count={transfer_count}
 
 POST Body（默认模板，可自行修改）：
 {"event":"transfer.completed","category":"{category}","status":"{status}","count":{transfer_count},"files":{transferred_files_json},"path":"{save_path}"}</pre>
-              <p style="margin: 0"><b style="color: var(--text)">注意事项：</b>勾选「0 转存不回调」后，本次（轮次模式按整轮汇总）没有任何新文件且无失败时不调用接口，有失败仍会回调；HTTP 2xx 视为成功；超时默认 15 秒（可配）；调用失败不自动重试，结果记录在「回调日志」里；请求头（可能含密钥）明文存于本地数据库；服务重启会丢失进行中的轮次；下游接口建议使用内网地址。</p>
-            </div>
-          </div>
-          <div class="modal-foot">
-            <span class="flex-1"></span>
-            <button class="btn" @click="showCatHelp = false">我知道了</button>
-          </div>
+          <p style="margin: 0"><b style="color: var(--text)">注意事项：</b>勾选「0 转存不回调」后，本次（轮次模式按整轮汇总）没有任何新文件且无失败时不调用接口，有失败仍会回调；HTTP 2xx 视为成功；超时默认 15 秒（可配）；调用失败不自动重试，结果记录在「回调日志」里；请求头（可能含密钥）明文存于本地数据库；服务重启会丢失进行中的轮次；下游接口建议使用内网地址。</p>
         </div>
-      </div>
-    </Teleport>
+        <template #footer>
+          <button class="btn" @click="showCatHelp = false">我知道了</button>
+        </template>
+      </Modal>
   </div>
 </template>

@@ -87,29 +87,19 @@ onBeforeUnmount(stopPoll)
 </script>
 
 <template>
-  <Teleport to="body">
-    <div v-if="visible" class="modal-overlay" @mousedown.self="close">
-      <div class="modal" style="width: 400px">
-        <div class="modal-head">
-          <div class="modal-title">{{ qrTitle }}</div>
-          <button class="modal-close" @click="close">✕</button>
+  <Modal v-model="visible" :title="qrTitle" @closed="stopPoll">
+    <div class="qr-box">
+      <div v-if="!qrImg" class="loading-block"><span class="spinner"></span></div>
+      <img v-else class="qr-img" :src="qrImg" alt="二维码" />
+      <div class="qr-hint">
+        {{ qrHint }}
+        <div v-if="status === 'waiting'" class="flex" style="justify-content: center; margin-top: 8px">
+          <span class="spinner"></span><span class="muted" style="font-size: 12px">等待扫码确认…</span>
         </div>
-        <div class="modal-body">
-          <div class="qr-box">
-            <div v-if="!qrImg" class="loading-block"><span class="spinner"></span></div>
-            <img v-else class="qr-img" :src="qrImg" alt="二维码" />
-            <div class="qr-hint">
-              {{ qrHint }}
-              <div v-if="status === 'waiting'" class="flex" style="justify-content: center; margin-top: 8px">
-                <span class="spinner"></span><span class="muted" style="font-size: 12px">等待扫码确认…</span>
-              </div>
-              <div v-if="status === 'expired' || status === 'failed'" style="margin-top: 10px">
-                <button class="btn btn-sm" @click="start(lastType)">刷新二维码</button>
-              </div>
-            </div>
-          </div>
+        <div v-if="status === 'expired' || status === 'failed'" style="margin-top: 10px">
+          <button class="btn btn-sm" @click="start(lastType)">刷新二维码</button>
         </div>
       </div>
     </div>
-  </Teleport>
+  </Modal>
 </template>

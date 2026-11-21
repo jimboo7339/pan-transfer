@@ -82,24 +82,17 @@ function switchTab(t) {
 </script>
 
 <template>
-  <Teleport to="body">
-    <div v-if="visible" class="modal-overlay" @mousedown.self="visible = false">
-      <div class="modal modal-lg">
-        <div class="modal-head">
-          <div class="modal-title">「{{ task?.task_name }}」运行记录</div>
-          <button class="modal-close" @click="visible = false">✕</button>
-        </div>
-        <div class="modal-body">
-          <div class="tabs">
-            <button class="tab" :class="{ active: tab === 'runs' }" @click="switchTab('runs')">运行记录</button>
-            <button class="tab" :class="{ active: tab === 'saved' }" @click="switchTab('saved')">已转存文件</button>
-          </div>
+  <Modal v-model="visible" size="lg" :title="`「${task?.task_name || ''}」运行记录`">
+    <div class="tabs">
+      <button class="tab" :class="{ active: tab === 'runs' }" @click="switchTab('runs')">运行记录</button>
+      <button class="tab" :class="{ active: tab === 'saved' }" @click="switchTab('saved')">已转存文件</button>
+    </div>
 
-          <div v-if="loading" class="loading-block"><span class="spinner"></span></div>
+    <div v-if="loading" class="loading-block"><span class="spinner"></span></div>
 
-          <template v-else-if="tab === 'runs'">
-            <div v-if="!runs.length" class="empty">
-              <div class="empty-title">还没有运行记录</div>
+    <template v-else-if="tab === 'runs'">
+      <div v-if="!runs.length" class="empty">
+        <div class="empty-title">还没有运行记录</div>
               <div class="empty-hint">点击任务卡片上的「运行」立即执行一次</div>
             </div>
             <div v-else style="display: flex; flex-direction: column; gap: 10px">
@@ -127,29 +120,26 @@ function switchTab(t) {
             </div>
           </template>
 
-          <template v-else>
-            <div class="flex mb-8" style="justify-content: space-between">
-              <span class="muted" style="font-size: 12.5px">共 {{ savedTotal }} 条记录（列表最多显示 {{ saved.length }} 条）</span>
-              <button v-if="savedTotal" class="btn btn-sm btn-danger btn-ghost" :disabled="clearing" @click="clearSaved">🗑 清空转存历史</button>
-            </div>
-            <div v-if="!saved.length" class="empty">
-              <div class="empty-title">暂无转存记录</div>
-              <div class="empty-hint">成功转存的文件会记录在此，用于按名跳过重复转存</div>
-            </div>
-            <div v-else class="table-wrap">
-              <table class="table">
-                <thead><tr><th>文件名</th><th style="width: 160px">转存时间</th></tr></thead>
-                <tbody>
-                  <tr v-for="s in saved" :key="s.id">
-                    <td class="ellipsis" :title="s.file_name">{{ s.file_name }}</td>
-                    <td class="num muted">{{ fmtTime(s.saved_at) }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </template>
-        </div>
-      </div>
-    </div>
-  </Teleport>
+        <template v-else>
+          <div class="flex mb-8" style="justify-content: space-between">
+            <span class="muted" style="font-size: 12.5px">共 {{ savedTotal }} 条记录（列表最多显示 {{ saved.length }} 条）</span>
+            <button v-if="savedTotal" class="btn btn-sm btn-danger btn-ghost" :disabled="clearing" @click="clearSaved">🗑 清空转存历史</button>
+          </div>
+          <div v-if="!saved.length" class="empty">
+            <div class="empty-title">暂无转存记录</div>
+            <div class="empty-hint">成功转存的文件会记录在此，用于按名跳过重复转存</div>
+          </div>
+          <div v-else class="table-wrap">
+            <table class="table">
+              <thead><tr><th>文件名</th><th style="width: 160px">转存时间</th></tr></thead>
+              <tbody>
+                <tr v-for="s in saved" :key="s.id">
+                  <td class="ellipsis" :title="s.file_name">{{ s.file_name }}</td>
+                  <td class="num muted">{{ fmtTime(s.saved_at) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+  </Modal>
 </template>

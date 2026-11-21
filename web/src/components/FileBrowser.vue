@@ -83,41 +83,31 @@ function pick() {
 </script>
 
 <template>
-  <Teleport to="body">
-    <div v-if="visible" class="modal-overlay" @mousedown.self="visible = false">
-      <div class="modal modal-lg">
-        <div class="modal-head">
-          <div class="modal-title">选择保存目录</div>
-          <button class="modal-close" @click="visible = false">✕</button>
-        </div>
-        <div class="modal-body">
-          <div class="dir-crumb mb-8">
-            <a @click="jump(-1)">🏠 根目录</a>
-            <template v-for="(t, i) in trail" :key="i">
-              <span class="muted">/</span>
-              <a @click="jump(i)">{{ t.name }}</a>
-            </template>
-          </div>
-          <div class="fb-list">
-            <div v-if="loading" class="loading-block"><span class="spinner"></span></div>
-            <div v-else-if="!items.length" class="empty" style="padding: 28px"><div class="empty-hint">没有子文件夹</div></div>
-            <div v-else v-for="it in items" :key="it.id" class="fb-item" @click="enter(it)">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--warn)" stroke-width="2"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
-              <span class="flex-1 ellipsis">{{ it.name }}</span>
-              <span class="muted">›</span>
-            </div>
-          </div>
-          <div class="flex mt-16">
-            <input class="input" v-model="newName" placeholder="新建文件夹名称" @keyup.enter="mkdir" />
-            <button class="btn" :disabled="creating || !newName.trim()" @click="mkdir">新建</button>
-          </div>
-        </div>
-        <div class="modal-foot">
-          <span class="flex-1 mono muted">当前：/{{ trail.map(t => t.name).filter(n => n && n !== '根目录').join('/') }}</span>
-          <button class="btn" @click="visible = false">取消</button>
-          <button class="btn btn-primary" @click="pick">选择此目录</button>
-        </div>
+  <Modal v-model="visible" title="选择保存目录" size="lg">
+    <div class="dir-crumb mb-8">
+      <a @click="jump(-1)">🏠 根目录</a>
+      <template v-for="(t, i) in trail" :key="i">
+        <span class="muted">/</span>
+        <a @click="jump(i)">{{ t.name }}</a>
+      </template>
+    </div>
+    <div class="fb-list">
+      <div v-if="loading" class="loading-block"><span class="spinner"></span></div>
+      <div v-else-if="!items.length" class="empty" style="padding: 28px"><div class="empty-hint">没有子文件夹</div></div>
+      <div v-else v-for="it in items" :key="it.id" class="fb-item" @click="enter(it)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--warn)" stroke-width="2"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>
+        <span class="flex-1 ellipsis">{{ it.name }}</span>
+        <span class="muted">›</span>
       </div>
     </div>
-  </Teleport>
+    <div class="flex mt-16">
+      <input class="input" v-model="newName" placeholder="新建文件夹名称" @keyup.enter="mkdir" />
+      <button class="btn" :disabled="creating || !newName.trim()" @click="mkdir">新建</button>
+    </div>
+    <template #footer>
+      <span class="flex-1 mono muted">当前：/{{ trail.map(t => t.name).filter(n => n && n !== '根目录').join('/') }}</span>
+      <button class="btn" @click="visible = false">取消</button>
+      <button class="btn btn-primary" @click="pick">选择此目录</button>
+    </template>
+  </Modal>
 </template>

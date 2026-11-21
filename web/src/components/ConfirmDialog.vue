@@ -66,6 +66,12 @@ defineExpose({ open })
 </script>
 
 <template>
+  <!-- 统一确认弹层。
+       注意这里刻意不用 Modal.vue：ConfirmDialog 需要 role="alertdialog"
+       （而不是 dialog）——它的语义是"必须做出选择才能继续"，
+       读屏器会立即播报标题与正文。用 dialog 会让用户以为可以随便关掉。
+       焦点管理自己实现（初始聚焦到取消按钮，而不是确认按钮）：
+       破坏性操作的默认焦点应该是安全选项。 -->
   <Teleport to="body">
     <div v-if="visible" class="modal-overlay" @mousedown.self="settle(false)">
       <div class="modal" style="width: 440px" role="alertdialog" aria-modal="true"

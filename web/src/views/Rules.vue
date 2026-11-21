@@ -213,61 +213,51 @@ async function runTest() {
     </div>
 
     <!-- 编辑规则 -->
-    <Teleport to="body">
-      <div v-if="showEdit" class="modal-overlay" @mousedown.self="showEdit = false">
-        <div class="modal">
-          <div class="modal-head">
-            <div class="modal-title">{{ isBuiltin ? '覆盖内置规则' : '编辑规则' }}</div>
-            <button class="modal-close" @click="showEdit = false">✕</button>
-          </div>
-          <div class="modal-body">
-            <div class="form-row">
-              <div class="field">
-                <div class="field-label">规则标识 <span class="req">*</span></div>
-                <input class="input mono" v-model="form.key" :disabled="isBuiltin" placeholder="$MY_RULE" />
-                <div class="field-hint">以 $ 开头；与内置同名即为覆盖</div>
-              </div>
-              <div class="field">
-                <div class="field-label">显示名</div>
-                <input class="input" v-model="form.label" placeholder="规则用途说明" />
-              </div>
-            </div>
-            <div class="field">
-              <div class="field-label">匹配正则（pattern）</div>
-              <textarea class="textarea mono" v-model="form.pattern" placeholder="例如：.*?第(\d+)期.*"></textarea>
-            </div>
-            <div class="field">
-              <div class="field-label">替换模板（replace）</div>
-              <input class="input mono" v-model="form.replace" placeholder="例如：{TASKNAME}.S01E{E}.{EXT}" />
-            </div>
-
-            <div class="card card-pad" style="background: var(--surface-2)">
-              <div class="flex mb-8">
-                <div style="font-weight: 600; font-size: 13px">试算测试</div>
-                <span class="flex-1"></span>
-                <button class="btn btn-sm" :disabled="test.testing" @click="runTest">▶ 试算</button>
-              </div>
-              <input class="input" v-model="test.name" placeholder="输入样例文件名，如：第01集.mp4" @keyup.enter="runTest" />
-              <div v-if="test.result" class="test-result mt-8">
-                <div class="flex"><span class="muted">命中：</span>
-                  <span :class="test.result.matched ? 'text-success' : 'text-danger'">{{ test.result.matched ? '✓ 是' : '✕ 否' }}</span>
-                </div>
-                <div class="flex"><span class="muted">结果：</span><span class="mono">{{ test.result.result || '（不重命名）' }}</span></div>
-              </div>
-            </div>
-
-            <label class="checkbox mt-16">
-              <input type="checkbox" v-model="form.enabled" />
-              启用该规则（禁用后任务中引用它将回退为字面正则）
-            </label>
-          </div>
-          <div class="modal-foot">
-            <span class="flex-1"></span>
-            <button class="btn" @click="showEdit = false">取消</button>
-            <button class="btn btn-primary" :disabled="saving" @click="save">保存</button>
-          </div>
+    <Modal v-model="showEdit" :title="isBuiltin ? '覆盖内置规则' : '编辑规则'">
+      <div class="form-row">
+        <div class="field">
+          <div class="field-label">规则标识 <span class="req">*</span></div>
+          <input class="input mono" v-model="form.key" :disabled="isBuiltin" placeholder="$MY_RULE" />
+          <div class="field-hint">以 $ 开头；与内置同名即为覆盖</div>
+        </div>
+        <div class="field">
+          <div class="field-label">显示名</div>
+          <input class="input" v-model="form.label" placeholder="规则用途说明" />
         </div>
       </div>
-    </Teleport>
+      <div class="field">
+        <div class="field-label">匹配正则（pattern）</div>
+        <textarea class="textarea mono" v-model="form.pattern" placeholder="例如：.*?第(\d+)期.*"></textarea>
+      </div>
+      <div class="field">
+        <div class="field-label">替换模板（replace）</div>
+        <input class="input mono" v-model="form.replace" placeholder="例如：{TASKNAME}.S01E{E}.{EXT}" />
+      </div>
+
+      <div class="card card-pad" style="background: var(--surface-2)">
+        <div class="flex mb-8">
+          <div style="font-weight: 600; font-size: 13px">试算测试</div>
+          <span class="flex-1"></span>
+          <button class="btn btn-sm" :disabled="test.testing" @click="runTest">▶ 试算</button>
+        </div>
+        <input class="input" v-model="test.name" placeholder="输入样例文件名，如：第01集.mp4" @keyup.enter="runTest" />
+        <div v-if="test.result" class="test-result mt-8">
+          <div class="flex"><span class="muted">命中：</span>
+            <span :class="test.result.matched ? 'text-success' : 'text-danger'">{{ test.result.matched ? '✓ 是' : '✕ 否' }}</span>
+          </div>
+          <div class="flex"><span class="muted">结果：</span><span class="mono">{{ test.result.result || '（不重命名）' }}</span></div>
+        </div>
+      </div>
+
+      <label class="checkbox mt-16">
+        <input type="checkbox" v-model="form.enabled" />
+        启用该规则（禁用后任务中引用它将回退为字面正则）
+      </label>
+
+      <template #footer>
+        <button class="btn" @click="showEdit = false">取消</button>
+        <button class="btn btn-primary" :disabled="saving" @click="save">保存</button>
+      </template>
+    </Modal>
   </div>
 </template>
