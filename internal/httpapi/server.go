@@ -137,7 +137,6 @@ func (s *Server) transfer() *transfer.Service {
 	return svc
 }
 
-//
 // 存在的意义：transfer 是领域层，不能直接 import httpapi 拿 metrics；
 // 通过 main 装配把 sink 交给它，依赖方向保持 httpapi → transfer 单向。
 func (s *Server) MetricsSink() transfer.MetricsSink {
@@ -205,6 +204,11 @@ func (s *Server) routes() {
 
 	// 备份与还原
 	s.registerBackupRoutes()
+
+	// 配置导入 / 导出（不含凭据）
+	m.HandleFunc("GET /api/config/export", s.wrap(s.handleConfigExport))
+	m.HandleFunc("POST /api/config/import/preview", s.wrap(s.handleConfigImportPreview))
+	m.HandleFunc("POST /api/config/import", s.wrap(s.handleConfigImport))
 
 	// 设置与通知
 	m.HandleFunc("GET /api/settings", s.wrap(s.handleSettingsGet))
@@ -330,6 +334,10 @@ func writeErr(w http.ResponseWriter, err error) {
 		return
 	}
 	// 非领域错误：细节只进日志，不进响应。
+	// 必须记日志：否则"500 + 通用文案"会让排障变成猜谜。
+	// 这里用 slog 的全局 logger 而不是 Server.deps：writeErr 是包级函数，
+	// 登录失败等路径也会走到，而那些路径不持有 Server 实例。
+	slog.Error("未预期的服务端错误", "err", err)
 	writeJSON(w, http.StatusInternalServerError, map[string]apiError{"error": {
 		Code:    domain.CodeInternal,
 		Message: "服务器内部错误，请查看运行日志获取详细信息",
