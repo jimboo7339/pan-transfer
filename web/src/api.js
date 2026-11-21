@@ -88,10 +88,13 @@ export const taskApi = {
   batch: (d) => api.post('/api/tasks/batch', d),
 }
 
-// 异步运行句柄：轮询进度与实时日志，替代"同步等 30 分钟"。
+// 异步运行句柄（进度 / 取消 / 批量查）。
+// 批量查用于任务列表页：N 个任务同时跑时，一个个 GET 会让浏览器
+// 每秒发 N 个请求（SQLite 单连接下还会排队）。
 export const jobApi = {
   list: () => api.get('/api/jobs'),
   get: (id) => api.get(`/api/jobs/${id}`),
+  batch: (ids) => api.post('/api/jobs/batch', { ids }),
   cancel: (id) => api.post(`/api/jobs/${id}/cancel`),
   remove: (id) => api.del(`/api/jobs/${id}`),
 }

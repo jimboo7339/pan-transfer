@@ -1,6 +1,7 @@
 <script setup>
 // 转存任务主页：上下两块布局（运行中 / 已暂停）+ 筛选工具栏 + 新建/编辑/运行/暂停/删除。
 import { ref, inject, onMounted, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import TaskEdit from '../components/TaskEdit.vue'
 import TaskRuns from '../components/TaskRuns.vue'
 import TaskProgress from '../components/TaskProgress.vue'
@@ -10,6 +11,7 @@ import { cronToText } from '../cron'
 
 const toast = inject('toast')
 const confirmDialog = inject('confirmDialog')
+const router = useRouter()
 
 const tasks = ref([])
 const accounts = ref([])
@@ -28,6 +30,12 @@ const activeJobTaskId = ref(0)
 // 任务多到上百个时差别明显。
 const selectedIds = ref(new Set())
 const batchRef = ref(null)
+
+// 跳到任务详情（可分享、可深链）。
+// 此前点任务名只弹一个弹层，刷新就回到列表顶部、无法分享。
+function gotoDetail(t) {
+  router.push(`/tasks/${t.id}`)
+}
 
 // ---------- 批量操作 ----------
 function toggleSelect(id) {
@@ -311,7 +319,7 @@ const statusBadge = (t) => {
                 <label class="task-check" :title="'选择该任务'" @click.stop>
                   <input type="checkbox" :checked="isSelected(t.id)" @change="toggleSelect(t.id)" />
                 </label>
-                <div class="task-name" @click="runsRef.open(t)" :title="'查看运行记录'">{{ t.task_name }}</div>
+                <div class="task-name" @click="gotoDetail(t)" :title="'查看任务详情'">{{ t.task_name }}</div>
                 <span class="badge" :class="statusBadge(t).cls"><span class="dot"></span>{{ statusBadge(t).text }}</span>
               </div>
               <div class="task-meta">
@@ -363,7 +371,7 @@ const statusBadge = (t) => {
                 <label class="task-check" :title="'选择该任务'" @click.stop>
                   <input type="checkbox" :checked="isSelected(t.id)" @change="toggleSelect(t.id)" />
                 </label>
-                <div class="task-name" @click="runsRef.open(t)" :title="'查看运行记录'">{{ t.task_name }}</div>
+                <div class="task-name" @click="gotoDetail(t)" :title="'查看任务详情'">{{ t.task_name }}</div>
                 <span class="badge" :class="statusBadge(t).cls"><span class="dot"></span>{{ statusBadge(t).text }}</span>
               </div>
               <div class="task-meta">

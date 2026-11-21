@@ -18,6 +18,8 @@ const router = createRouter({
   routes: [
     { path: '/', component: () => import('./views/Dashboard.vue') },
     { path: '/tasks', component: () => import('./views/Tasks.vue') },
+    // 任务详情：可分享、可深链（从仪表盘告警/搜索结果/通知直接跳进来）
+    { path: '/tasks/:id', component: () => import('./views/TaskDetail.vue'), props: true },
     { path: '/logs', component: () => import('./views/Logs.vue') },
     { path: '/accounts', component: () => import('./views/Accounts.vue') },
     { path: '/rules', component: () => import('./views/Rules.vue') },

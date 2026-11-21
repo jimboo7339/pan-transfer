@@ -193,6 +193,9 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/jobs/{id}", s.wrap(s.handleJobGet))
 	m.HandleFunc("POST /api/jobs/{id}/cancel", s.wrap(s.handleJobCancel))
 	m.HandleFunc("DELETE /api/jobs/{id}", s.wrap(s.handleJobDelete))
+	// 批量查进度：任务列表页一次要显示多个 job 的状态，
+	// 一个个 GET 会让浏览器发 N 个请求（SQLite 单连接下还会排队）。
+	m.HandleFunc("POST /api/jobs/batch", s.wrap(s.handleJobsBatch))
 
 	// 命名正则规则
 	m.HandleFunc("GET /api/rules", s.wrap(s.handleRuleList))
@@ -1005,6 +1008,42 @@ func (s *Server) handleJobDelete(w http.ResponseWriter, r *http.Request) error {
 	}
 	s.transfer().RemoveJob(id)
 	respond(w, map[string]bool{"ok": true})
+	return nil
+}
+
+// handleJobsBatch 批量查 job 进度。
+//
+// 为什么要这个：任务列表页有 N 个任务在跑时，前端要逐个 GET /api/jobs/{id}。
+// 在 SQLite 单连接（SetMaxOpenConns(1)）下这些请求会排队，
+// 而轮询是每秒一次——N=10 时每秒 10 个请求全堵在同一个连接上，
+// 正常的 API 调用反而被拖慢。一次批量查询把 N 个请求合并成 1 个。
+func (s *Server) handleJobsBatch(w http.ResponseWriter, r *http.Request) error {
+	var in struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := decode(r, &in); err != nil {
+		return err
+	}
+	// 上限保护：批量查询的 ids 来自前端自己的列表，
+	// 但接口是公开的，必须防止有人塞几万个 id 把它变成放大器。
+	if len(in.IDs) > 500 {
+		return domain.Errorf(domain.CodeValidation, "单次最多查询 500 个运行句柄")
+	}
+	svc := s.transfer()
+	if svc == nil {
+		return errInternalf("转存服务未就绪")
+	}
+	out := make([]transfer.JobView, 0, len(in.IDs))
+	for _, id := range in.IDs {
+		if job, ok := svc.GetJob(id); ok {
+			out = append(out, *job)
+		}
+	}
+	respond(w, map[string]any{
+		"jobs": out,
+		// 找不到的 id 由前端自行处理（清理"已经消失的运行中任务"）。
+		"found": len(out),
+	})
 	return nil
 }
 

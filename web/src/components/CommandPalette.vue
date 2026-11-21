@@ -84,9 +84,17 @@ watch(q, (v) => {
   debounceTimer = setTimeout(runSearch, 250)
 })
 
+// 跳到任务详情（可深链）。
+// 搜索结果的 route 是后端给的前端路径（如 /tasks 或 /accounts），
+// 但任务类型的命中可以直接跳到 /tasks/:id，比落到列表更精确。
 function goto(hit) {
   close()
-  if (hit.route) router.push(hit.route)
+  if (!hit.route) return
+  if (hit.kind === 'task' && hit.id) {
+    router.push(`/tasks/${hit.id}`)
+    return
+  }
+  router.push(hit.route)
 }
 
 function onKeydown(e) {
