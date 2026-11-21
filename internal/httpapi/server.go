@@ -833,35 +833,41 @@ type taskIn struct {
 	RunTime         string   `json:"run_time"`
 	EndDate         string   `json:"end_date"`
 	UpdateSubdir    string   `json:"update_subdir"`
-	StartFID        string   `json:"start_fid"`
-	CategoryID      int64    `json:"category_id"`
-	SortIndex       int      `json:"sort_index"`
-	SkipHistory     string   `json:"skip_history"`
-	RunMode         string   `json:"run_mode"` // manual/global/custom
-	RunCron         string   `json:"run_cron"` // 5 字段 cron 表达式
-	Status          string   `json:"status"`
+	// UpdateSubdirResaveMode 控制子目录已存在时的行为：
+	// ""（增量，跳过已有文件）| "delete_then_resave"（先删再存）。
+	// 该字段一直在领域模型与执行器里（executor.go 会读它决定是否删远端目录），
+	// 但此前 taskIn/taskOut 都没带，导致这条分支永久不可达。
+	UpdateSubdirResaveMode string `json:"update_subdir_resave_mode"`
+	StartFID               string `json:"start_fid"`
+	CategoryID             int64  `json:"category_id"`
+	SortIndex              int    `json:"sort_index"`
+	SkipHistory            string `json:"skip_history"`
+	RunMode                string `json:"run_mode"` // manual/global/custom
+	RunCron                string `json:"run_cron"` // 5 字段 cron 表达式
+	Status                 string `json:"status"`
 }
 
 func (in *taskIn) toTask() *domain.DramaTask {
 	t := &domain.DramaTask{
-		ID:              in.ID,
-		TaskName:        in.TaskName,
-		AccountID:       in.AccountID,
-		SavePath:        in.SavePath,
-		Pattern:         in.Pattern,
-		Replace:         in.Replace,
-		IgnoreExtension: in.IgnoreExtension,
-		RunWeek:         in.RunWeek,
-		RunTime:         in.RunTime,
-		EndDate:         in.EndDate,
-		UpdateSubdir:    in.UpdateSubdir,
-		StartFID:        in.StartFID,
-		CategoryID:      in.CategoryID,
-		SortIndex:       in.SortIndex,
-		SkipHistory:     in.SkipHistory,
-		RunMode:         in.RunMode,
-		RunCron:         in.RunCron,
-		Status:          in.Status,
+		ID:                     in.ID,
+		TaskName:               in.TaskName,
+		AccountID:              in.AccountID,
+		SavePath:               in.SavePath,
+		Pattern:                in.Pattern,
+		Replace:                in.Replace,
+		IgnoreExtension:        in.IgnoreExtension,
+		RunWeek:                in.RunWeek,
+		RunTime:                in.RunTime,
+		EndDate:                in.EndDate,
+		UpdateSubdir:           in.UpdateSubdir,
+		UpdateSubdirResaveMode: in.UpdateSubdirResaveMode,
+		StartFID:               in.StartFID,
+		CategoryID:             in.CategoryID,
+		SortIndex:              in.SortIndex,
+		SkipHistory:            in.SkipHistory,
+		RunMode:                in.RunMode,
+		RunCron:                in.RunCron,
+		Status:                 in.Status,
 	}
 	transfer.SetLinks(t, in.Links)
 	return t
@@ -869,31 +875,32 @@ func (in *taskIn) toTask() *domain.DramaTask {
 
 func taskOut(t *domain.DramaTask) map[string]any {
 	return map[string]any{
-		"id":               t.ID,
-		"task_name":        t.TaskName,
-		"account_id":       t.AccountID,
-		"links":            transfer.LinksOf(t),
-		"save_path":        t.SavePath,
-		"pattern":          t.Pattern,
-		"replace":          t.Replace,
-		"ignore_extension": t.IgnoreExtension,
-		"run_week":         t.RunWeek,
-		"run_time":         t.RunTime,
-		"end_date":         t.EndDate,
-		"update_subdir":    t.UpdateSubdir,
-		"start_fid":        t.StartFID,
-		"category_id":      t.CategoryID,
-		"sort_index":       t.SortIndex,
-		"skip_history":     t.SkipHistory,
-		"run_mode":         transfer.EffectiveRunMode(t),
-		"run_cron":         t.RunCron,
-		"status":           t.Status,
-		"last_run_at":      t.LastRunAt,
-		"last_run_status":  t.LastRunStatus,
-		"last_run_message": t.LastRunMessage,
-		"last_tree":        t.LastTreeSummary,
-		"created_at":       t.CreatedAt,
-		"updated_at":       t.UpdatedAt,
+		"id":                        t.ID,
+		"task_name":                 t.TaskName,
+		"account_id":                t.AccountID,
+		"links":                     transfer.LinksOf(t),
+		"save_path":                 t.SavePath,
+		"pattern":                   t.Pattern,
+		"replace":                   t.Replace,
+		"ignore_extension":          t.IgnoreExtension,
+		"run_week":                  t.RunWeek,
+		"run_time":                  t.RunTime,
+		"end_date":                  t.EndDate,
+		"update_subdir":             t.UpdateSubdir,
+		"update_subdir_resave_mode": t.UpdateSubdirResaveMode,
+		"start_fid":                 t.StartFID,
+		"category_id":               t.CategoryID,
+		"sort_index":                t.SortIndex,
+		"skip_history":              t.SkipHistory,
+		"run_mode":                  transfer.EffectiveRunMode(t),
+		"run_cron":                  t.RunCron,
+		"status":                    t.Status,
+		"last_run_at":               t.LastRunAt,
+		"last_run_status":           t.LastRunStatus,
+		"last_run_message":          t.LastRunMessage,
+		"last_tree":                 t.LastTreeSummary,
+		"created_at":                t.CreatedAt,
+		"updated_at":                t.UpdatedAt,
 	}
 }
 
@@ -1049,14 +1056,14 @@ func (s *Server) handleTaskRun(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	respond(w, map[string]any{
-		"job_id":      job.ID,
-		"task_id":     job.TaskID,
-		"task_name":   job.TaskName,
-		"status":      "running",
-		"running":     true,
-		"stage":       job.Stage,
-		"started_at":  job.StartedAt,
-		"poll_hint":   "轮询 GET /api/jobs/" + fmt.Sprintf("%d", job.ID) + " 获取进度与日志",
+		"job_id":     job.ID,
+		"task_id":    job.TaskID,
+		"task_name":  job.TaskName,
+		"status":     "running",
+		"running":    true,
+		"stage":      job.Stage,
+		"started_at": job.StartedAt,
+		"poll_hint":  "轮询 GET /api/jobs/" + fmt.Sprintf("%d", job.ID) + " 获取进度与日志",
 	})
 	return nil
 }

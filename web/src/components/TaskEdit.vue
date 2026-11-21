@@ -32,6 +32,7 @@ const form = reactive({
   run_cron: '',
   end_date: '',
   update_subdir: '',
+  update_subdir_resave_mode: '',
   start_fid: '',
   category_id: 0,
   sort_index: 1,
@@ -114,6 +115,7 @@ async function open(task) {
       run_cron: task.run_cron || '',
       end_date: task.end_date,
       update_subdir: task.update_subdir,
+      update_subdir_resave_mode: task.update_subdir_resave_mode || '',
       start_fid: task.start_fid,
       category_id: task.category_id || 0,
       sort_index: task.sort_index || 1,
@@ -133,6 +135,7 @@ async function open(task) {
       links: [''], save_path: '', pattern: '', replace: '',
       ignore_extension: true, run_week: '', run_time: '', run_cron: '', end_date: '',
       update_subdir: '', start_fid: '', category_id: 0, sort_index: 1, skip_history: 'global',
+      update_subdir_resave_mode: '',
       run_mode: 'manual', status: 'running',
     })
     scheduleMode.value = 'manual'
@@ -344,6 +347,38 @@ async function save() {
               <div class="field" style="margin-bottom: 0">
                 <div class="field-label">起始 fid（增量，可选）</div>
                 <input class="input mono" v-model="form.start_fid" placeholder="只转存该文件之后的更新（手工填 fid）" />
+              </div>
+            </div>
+
+            <!-- 起始集号：后端字段 sort_index 一直是通的（planTransfer 用它作为 {I+} 的
+                 起始序号），但表单里从未暴露过控件，用户无法指定"从第 1 集开始编号"。
+                 例如把第 12 集起的内容单独转存为 S01E01。 -->
+            <div class="form-row mt-16">
+              <div class="field" style="margin-bottom: 0">
+                <div class="field-label">
+                  起始集号（{II} 递增序号从几开始）
+                </div>
+                <input class="input" type="number" min="1" max="9999"
+                  v-model.number="form.sort_index" placeholder="默认 1" />
+                <div class="field-hint">
+                  仅当替换模板里用到 <code class="mono">{II}</code> 时生效。
+                  想让「第 12 集」变成 <code class="mono">E01</code> 就填 1 并把该集放在最前。
+                </div>
+              </div>
+              <div class="field" style="margin-bottom: 0">
+                <div class="field-label">子目录已存在时</div>
+                <select class="select" v-model="form.update_subdir_resave_mode"
+                  :disabled="!form.update_subdir">
+                  <option value="">增量：跳过已存在的文件</option>
+                  <option value="delete_then_resave">先删除再重存（⚠ 会删远端目录）</option>
+                </select>
+                <div class="field-hint">
+                  仅当上面填了「子目录同步正则」时可用。
+                  <span v-if="form.update_subdir_resave_mode === 'delete_then_resave'" class="text-danger">
+                    ⚠ 该模式会先删除目标目录中命中的子目录再重新转存，请确认目录内容可丢弃。
+                  </span>
+                  <span v-else>默认增量：已有的文件会被跳过。</span>
+                </div>
               </div>
             </div>
           </div>

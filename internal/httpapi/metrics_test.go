@@ -93,21 +93,21 @@ func TestMetricsCountsRequests(t *testing.T) {
 // TestMetricsNormalizesRoute 验证路径归一化覆盖主要端点。
 func TestMetricsNormalizesRoute(t *testing.T) {
 	cases := map[string]string{
-		"/api/tasks/42/runs":             "/api/tasks/{id}/runs",
-		"/api/tasks/42/saved-names":      "/api/tasks/{id}/saved-names",
+		"/api/tasks/42/runs":              "/api/tasks/{id}/runs",
+		"/api/tasks/42/saved-names":       "/api/tasks/{id}/saved-names",
 		"/api/tasks/42/saved-names/count": "/api/tasks/{id}/saved-names/count",
-		"/api/tasks/42/status":           "/api/tasks/{id}/status",
-		"/api/tasks/42/run":              "/api/tasks/{id}/run",
-		"/api/tasks/42":                  "/api/tasks/{id}",
-		"/api/accounts/7/probe":          "/api/accounts/{id}/probe",
-		"/api/accounts/7/profile":        "/api/accounts/{id}/profile",
-		"/api/accounts/7":                "/api/accounts/{id}",
-		"/api/categories/3/test":         "/api/categories/{id}/test",
+		"/api/tasks/42/status":            "/api/tasks/{id}/status",
+		"/api/tasks/42/run":               "/api/tasks/{id}/run",
+		"/api/tasks/42":                   "/api/tasks/{id}",
+		"/api/accounts/7/probe":           "/api/accounts/{id}/probe",
+		"/api/accounts/7/profile":         "/api/accounts/{id}/profile",
+		"/api/accounts/7":                 "/api/accounts/{id}",
+		"/api/categories/3/test":          "/api/categories/{id}/test",
 		"/api/categories/3/callback-logs": "/api/categories/{id}/callback-logs",
-		"/api/jobs/9/cancel":             "/api/jobs/{id}/cancel",
-		"/api/jobs/9":                    "/api/jobs/{id}",
-		"/api/settings":                  "/api/settings",
-		"/api/health":                    "/api/health",
+		"/api/jobs/9/cancel":              "/api/jobs/{id}/cancel",
+		"/api/jobs/9":                     "/api/jobs/{id}",
+		"/api/settings":                   "/api/settings",
+		"/api/health":                     "/api/health",
 	}
 	for in, want := range cases {
 		if got := normalizeRoute(in); got != want {

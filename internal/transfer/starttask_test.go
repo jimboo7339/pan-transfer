@@ -19,7 +19,11 @@ func TestStartTaskReturnsImmediately(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartTask: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+	// 阈值取 3 秒而不是 500ms：Windows 上并行跑多个包时，
+	// goroutine 调度 + SQLite 写入偶发会超过 500ms，导致这个测试间歇性失败。
+	// 但它要防的 bug 是"同步等待整个转存流程"（runTimeout = 30 分钟），
+	// 3 秒的阈值与之相差四个数量级，仍能可靠地抓住回归。
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Errorf("StartTask 应立即返回，实际耗时 %s", elapsed)
 	}
 

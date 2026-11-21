@@ -65,18 +65,18 @@ type JobState struct {
 
 // JobView 是返回给前端的视图（无锁，可安全拷贝与序列化）。
 type JobView struct {
-	ID        int64      `json:"id"`
-	TaskID    int64      `json:"task_id"`
-	TaskName  string     `json:"task_name"`
-	Trigger   string     `json:"trigger"`
-	Status    string     `json:"status"`
-	Stage     string     `json:"stage"`
-	Progress  int        `json:"progress"`
-	StartedAt time.Time  `json:"started_at"`
-	FinishedAt time.Time `json:"finished_at,omitempty"`
-	Result    *RunResult `json:"result,omitempty"`
-	Err       string     `json:"error,omitempty"`
-	Log       string     `json:"log,omitempty"`
+	ID         int64      `json:"id"`
+	TaskID     int64      `json:"task_id"`
+	TaskName   string     `json:"task_name"`
+	Trigger    string     `json:"trigger"`
+	Status     string     `json:"status"`
+	Stage      string     `json:"stage"`
+	Progress   int        `json:"progress"`
+	StartedAt  time.Time  `json:"started_at"`
+	FinishedAt time.Time  `json:"finished_at,omitempty"`
+	Result     *RunResult `json:"result,omitempty"`
+	Err        string     `json:"error,omitempty"`
+	Log        string     `json:"log,omitempty"`
 }
 
 // jobRegistry 管理进程内的 job 句柄。

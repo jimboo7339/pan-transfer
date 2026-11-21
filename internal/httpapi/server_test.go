@@ -58,6 +58,9 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 	t.Cleanup(func() {
 		svc.Close()
 		forceClose(srv)
+		// 必须在 forceClose 之后关库：SetMaxIdleConns(0) 丢弃空闲连接，
+		// 句柄才真正释放，Windows 上 t.TempDir() 的 RemoveAll 才不会报"目录非空"。
+		_ = st.Close()
 	})
 	return srv, st
 }

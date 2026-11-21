@@ -850,6 +850,18 @@ func (s *Service) SaveTask(ctx context.Context, t *domain.DramaTask) (int64, err
 	if t.SkipHistory != "on" && t.SkipHistory != "off" {
 		t.SkipHistory = "global"
 	}
+	// 子目录重存模式白名单：该值决定执行器是否删除远端目录，
+	// 拼错的字符串会让行为回落到未知分支，必须在入库前拦住。
+	switch t.UpdateSubdirResaveMode {
+	case "", "delete_then_resave":
+	default:
+		return 0, domain.Errorf(domain.CodeValidation,
+			"update_subdir_resave_mode 只能是空（增量）或 delete_then_resave")
+	}
+	// 起始集号兜底：<=0 视为 1（planTransfer 用它作为 {I+} 的起始序号）。
+	if t.SortIndex <= 0 {
+		t.SortIndex = 1
+	}
 	switch t.RunMode {
 	case "global", "custom", "manual":
 	default:
