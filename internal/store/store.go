@@ -332,13 +332,30 @@ func (s *Store) UpdateTaskRunState(ctx context.Context, id int64, lastRunAt, sta
 }
 
 // SetTaskStatus 暂停/恢复任务。
+//
+// 检查影响行数：UPDATE 对不存在的主键不会报错，只影响 0 行。
+// 早先直接返回 err（nil），于是「暂停一个已被删除的任务」会返回成功——
+// 批量操作时用户会看到"暂停成功"但什么都没发生。
 func (s *Store) SetTaskStatus(ctx context.Context, id int64, status string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET status=?, updated_at=? WHERE id=?`,
+	res, err := s.db.ExecContext(ctx, `UPDATE tasks SET status=?, updated_at=? WHERE id=?`,
 		boolInt(status != "paused"), nowStr(), id)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return domain.Errorf(domain.CodeNotFound, "任务不存在")
+	}
+	return nil
 }
 
 // DeleteTask 删除任务及其运行历史与转存历史。
+//
+// 同样检查影响行数：删一个不存在的任务此前返回 nil，
+// 批量删除时用户会以为删掉了。
 func (s *Store) DeleteTask(ctx context.Context, id int64) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM task_runs WHERE task_id=?`, id); err != nil {
 		return err
@@ -346,8 +363,18 @@ func (s *Store) DeleteTask(ctx context.Context, id int64) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM saved_names WHERE task_id=?`, id); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM tasks WHERE id=?`, id)
-	return err
+	res, err := s.db.ExecContext(ctx, `DELETE FROM tasks WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return domain.Errorf(domain.CodeNotFound, "任务不存在")
+	}
+	return nil
 }
 
 // GetTask 按 ID 取任务。

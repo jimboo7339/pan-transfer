@@ -302,6 +302,33 @@ func TestMarkInterruptedRuns(t *testing.T) {
 	}
 }
 
+// TestSetTaskStatusRejectsMissing 验证暂停一个不存在的任务会报错。
+//
+// 这是个真实踩到的 bug：UPDATE 对不存在的 id 不报错、只影响 0 行，
+// 于是「暂停一个已被删除的任务」返回 nil。批量操作时用户会看到
+// "暂停成功"但什么都没发生——批量场景下一屏几十个 ID，
+// 这种静默失败极难排查。
+func TestSetTaskStatusRejectsMissing(t *testing.T) {
+	s, dir, closeStore := openTestStore(t)
+	defer func() { closeStore(); _ = os.RemoveAll(dir) }()
+	ctx := context.Background()
+
+	if err := s.SetTaskStatus(ctx, 99999, "paused"); err == nil {
+		t.Error("暂停不存在的任务应返回错误")
+	}
+}
+
+// TestDeleteTaskRejectsMissing 验证删除不存在的任务会报错（同上）。
+func TestDeleteTaskRejectsMissing(t *testing.T) {
+	s, dir, closeStore := openTestStore(t)
+	defer func() { closeStore(); _ = os.RemoveAll(dir) }()
+	ctx := context.Background()
+
+	if err := s.DeleteTask(ctx, 99999); err == nil {
+		t.Error("删除不存在的任务应返回错误")
+	}
+}
+
 // TestCountTasksByAccount 验证账号引用检查（删账号前必须知道有多少任务依赖它）。
 // 全仓没有生效的外键，不检查就会留下悬空 account_id 的僵尸任务。
 func TestCountTasksByAccount(t *testing.T) {

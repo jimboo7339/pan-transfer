@@ -4,6 +4,7 @@ import { ref, inject, onMounted, computed } from 'vue'
 import TaskEdit from '../components/TaskEdit.vue'
 import TaskRuns from '../components/TaskRuns.vue'
 import TaskProgress from '../components/TaskProgress.vue'
+import BatchBar from '../components/BatchBar.vue'
 import { taskApi, accountApi, categoryApi, fmtTime } from '../api'
 import { cronToText } from '../cron'
 
@@ -21,6 +22,62 @@ const runningIds = ref(new Set())
 // 当前正在展示进度的 job（同一时间只跟一个，避免多路轮询互相干扰）。
 const activeJobId = ref(0)
 const activeJobTaskId = ref(0)
+
+// 批量操作：选中的任务 ID 集合 + 浮动条引用。
+// 选中态用 Set 而不是数组：toggle 是 O(1)，判断包含也是 O(1)，
+// 任务多到上百个时差别明显。
+const selectedIds = ref(new Set())
+const batchRef = ref(null)
+
+// ---------- 批量操作 ----------
+function toggleSelect(id) {
+  const s = new Set(selectedIds.value)
+  s.has(id) ? s.delete(id) : s.add(id)
+  selectedIds.value = s
+}
+
+function isSelected(id) {
+  return selectedIds.value.has(id)
+}
+
+// 批量删除：破坏性且不可逆，先弹二次确认（要求输入"删除"），
+// 再走批量端点。确认后清空选中集合。
+async function askBatchDelete() {
+  const ids = [...selectedIds.value]
+  if (ids.length === 0) return
+  const ok = await confirmDialog({
+    title: '批量删除任务',
+    body: `确定删除选中的 ${ids.length} 个任务？`,
+    warn: '这些任务的运行记录与转存历史将一并删除，此操作不可撤销。',
+    confirmText: `删除 ${ids.length} 个`,
+    variant: 'danger',
+    requireText: '删除',
+  })
+  if (!ok) return
+  try {
+    const res = await taskApi.batch({ ids, action: 'delete' })
+    toast(`已删除 ${res.succeeded} 个任务` +
+      (res.failed ? `，${res.failed} 个失败` : ''), res.failed ? 'info' : 'success', 6000)
+    selectedIds.value = new Set()
+    await reload()
+  } catch (e) {
+    toast(e.message, 'error', 6000)
+  }
+}
+
+// 批量操作完成后刷新列表，并清理不再存在的选中项。
+async function onBatchDone(res) {
+  const n = res?.succeeded ?? 0
+  const f = res?.failed ?? 0
+  toast(`批量操作完成：${n} 个成功` + (f ? `，${f} 个失败` : ''),
+    f ? 'info' : 'success', 5000)
+  await reload()
+  // 只保留仍然存在的选中项（删除后 ID 已失效）
+  const alive = new Set(tasks.value.map(t => t.id))
+  const s = new Set([...selectedIds.value].filter(id => alive.has(id)))
+  selectedIds.value = s
+  if (batchRef.value && s.size === 0) batchRef.value.clearSelection()
+}
 
 // 筛选条件
 const keyword = ref('')
@@ -246,8 +303,14 @@ const statusBadge = (t) => {
             <span class="section-count">{{ runningTasks.length }}</span>
           </div>
           <div v-if="runningTasks.length" class="grid-cards">
-            <div v-for="t in runningTasks" :key="t.id" class="card task-card">
+            <div v-for="t in runningTasks" :key="t.id"
+              class="card task-card" :class="{ 'task-card-selected': isSelected(t.id) }">
               <div class="task-head">
+                <!-- 勾选框默认隐藏，hover 或已选中时显现：
+                     批量操作是"偶尔用一下"的能力，不该常驻占据视觉 -->
+                <label class="task-check" :title="'选择该任务'" @click.stop>
+                  <input type="checkbox" :checked="isSelected(t.id)" @change="toggleSelect(t.id)" />
+                </label>
                 <div class="task-name" @click="runsRef.open(t)" :title="'查看运行记录'">{{ t.task_name }}</div>
                 <span class="badge" :class="statusBadge(t).cls"><span class="dot"></span>{{ statusBadge(t).text }}</span>
               </div>
@@ -294,8 +357,12 @@ const statusBadge = (t) => {
             <span class="section-count">{{ pausedTasks.length }}</span>
           </div>
           <div v-if="pausedTasks.length" class="grid-cards">
-            <div v-for="t in pausedTasks" :key="t.id" class="card task-card task-card-paused">
+            <div v-for="t in pausedTasks" :key="t.id"
+              class="card task-card task-card-paused" :class="{ 'task-card-selected': isSelected(t.id) }">
               <div class="task-head">
+                <label class="task-check" :title="'选择该任务'" @click.stop>
+                  <input type="checkbox" :checked="isSelected(t.id)" @change="toggleSelect(t.id)" />
+                </label>
                 <div class="task-name" @click="runsRef.open(t)" :title="'查看运行记录'">{{ t.task_name }}</div>
                 <span class="badge" :class="statusBadge(t).cls"><span class="dot"></span>{{ statusBadge(t).text }}</span>
               </div>
@@ -338,6 +405,10 @@ const statusBadge = (t) => {
 
     <TaskEdit ref="editRef" @saved="reload" />
     <TaskRuns ref="runsRef" />
+
+    <!-- 批量操作浮动条：勾选卡片后出现 -->
+    <BatchBar ref="batchRef" :visible-tasks="filteredTasks"
+      @done="onBatchDone" @ask-delete="askBatchDelete" />
 
     <!-- 实时进度：异步运行后不必再刷新页面猜进度 -->
     <TaskProgress v-if="activeJobId" :key="activeJobId" :job-id="activeJobId"

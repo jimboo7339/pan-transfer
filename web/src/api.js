@@ -84,6 +84,8 @@ export const taskApi = {
   savedNames: (id, limit = 300) => api.get(`/api/tasks/${id}/saved-names?limit=${limit}`),
   savedCount: (id) => api.get(`/api/tasks/${id}/saved-names/count`),
   clearSavedNames: (id) => api.del(`/api/tasks/${id}/saved-names`),
+  // 批量操作：{ ids, action, category_id?, run_mode? } → { total, succeeded, failed, items }
+  batch: (d) => api.post('/api/tasks/batch', d),
 }
 
 // 异步运行句柄：轮询进度与实时日志，替代"同步等 30 分钟"。
