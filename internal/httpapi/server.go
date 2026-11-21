@@ -178,6 +178,7 @@ func (s *Server) routes() {
 	// 任务
 	m.HandleFunc("GET /api/tasks", s.wrap(s.handleTaskList))
 	m.HandleFunc("POST /api/tasks", s.wrap(s.handleTaskCreate))
+	m.HandleFunc("POST /api/tasks/batch", s.wrap(s.handleTaskBatch))
 	m.HandleFunc("PUT /api/tasks/{id}", s.wrap(s.handleTaskUpdate))
 	m.HandleFunc("DELETE /api/tasks/{id}", s.wrap(s.handleTaskDelete))
 	m.HandleFunc("POST /api/tasks/{id}/status", s.wrap(s.handleTaskStatus))
