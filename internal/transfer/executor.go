@@ -229,14 +229,15 @@ func (e *DramaExecutor) Execute(ctx context.Context) (string, error) {
 		driver.InvalidateDirCache(ctx, e.task.AccountID, destFID)
 		// 8. 重命名（来自Trae）
 		e.section("重命名")
-		e.renameFiles(ctx, savedFIDs, plan, destFID)
-		limit := len(plan)
-		if len(savedFIDs) < limit {
-			limit = len(savedFIDs)
-		}
-		for i := 0; i < limit; i++ {
-			tree.add(1, fmt.Sprintf("%d. %s -> %s", i+1, plan[i].originName, plan[i].targetName))
-			e.transferNames = append(e.transferNames, plan[i].targetName)
+		// 只列出**确实拿到了 fid** 的计划项。
+		// 早先这里用 min(len(plan), len(savedFIDs)) 截断后按下标输出，
+		// 隐含假设 savedFIDs[i] 对应 plan[i]；而 renameFiles 已改成按名字对齐
+		// （见那里的注释），所以树状摘要也要按实际转存成功的项来写，
+		// 否则日志会显示"1. a.mkv -> x.mkv"而实际转的是别的文件。
+		renamed := e.renameFiles(ctx, savedFIDs, plan, destFID)
+		for i, r := range renamed {
+			tree.add(1, fmt.Sprintf("%d. %s -> %s", i+1, r.originName, r.targetName))
+			e.transferNames = append(e.transferNames, r.targetName)
 		}
 	}
 	e.progress("收尾", 96)
@@ -544,33 +545,68 @@ func (e *DramaExecutor) saveFiles(ctx context.Context, pwdID, stoken, destFID st
 	return allSavedFIDs, nil
 }
 
-// renameFiles 按计划重命名转存后的文件（来自Trae）。
+// renameFiles 按计划重命名转存后的文件。
 // 包含二次校验：列出目标目录确认改名是否生效，未生效则重试。
-func (e *DramaExecutor) renameFiles(ctx context.Context, savedFIDs []string, plan []dramaPlanItem, destFID string) {
+//
+// 关键：fid 与 plan 的对应关系必须**按文件名对齐**，不能靠下标。
+//
+// 早先这里用 savedFIDs[i] 配 plan[i]，隐含假设是
+// "驱动 SaveShareFiles 严格按请求顺序一一返回 fid"。
+// 这不是契约保证：
+//   - 光鸭是同步 restore 接口，靠 diff 目标目录对齐，顺序与请求无关；
+//   - 夸克是异步 task，save_as_top_fids 的返回顺序取决于服务端。
+// 只要上游做了去重、过滤或重排，plan[i] 就会指向**另一个文件**，
+// RenameFile 会把 A 文件改成 B 的名字 —— 静默的数据错乱，
+// 而且日志里显示的还是正确的 origin->target，排障时完全看不出来。
+//
+// 因此改成：先列一次目标目录建立「当前名字 -> fid」映射，
+// 再用 plan[i].originName 去查 fid。名字对不上的直接跳过并记录，
+// 宁可少改几个名字，也不能改错文件。
+func (e *DramaExecutor) renameFiles(ctx context.Context, savedFIDs []string, plan []dramaPlanItem, destFID string) []dramaPlanItem {
 	renamer, ok := e.drv.(driver.Renamer)
 	if !ok {
 		e.line("驱动不支持重命名，跳过")
-		return
+		return nil
 	}
 
-	limit := len(savedFIDs)
-	if len(plan) < limit {
-		limit = len(plan)
+	// 建立「文件名 -> fid」映射。优先用 savedFIDs 反查出的名字，
+	// 但列目录更可靠（savedFIDs 只给 fid，名字得靠目录列表）。
+	driver.InvalidateDirCache(ctx, e.task.AccountID, destFID)
+	items, _, err := driver.ListFilesCached(ctx, e.drv, e.task.AccountID, destFID)
+	if err != nil {
+		e.line("INFO: 无法读取目标目录，跳过重命名")
+		return nil
+	}
+	nameToFID := make(map[string]string, len(items))
+	for _, it := range items {
+		if it.IsDir || it.ID == "" || it.Name == "" {
+			continue
+		}
+		// 同名文件可能存在（不同子目录转存到同一目录），保留第一个即可：
+		// 重命名只需要"有一个 fid 能改成目标名"。
+		if _, exists := nameToFID[it.Name]; !exists {
+			nameToFID[it.Name] = it.ID
+		}
 	}
 
 	type attempt struct {
 		fid, origin, target string
 	}
 	var attempted []attempt
+	var renamed []dramaPlanItem
+	var unresolved int
 
-	for i := 0; i < limit; i++ {
-		fid := strings.TrimSpace(savedFIDs[i])
-		if fid == "" {
-			continue
-		}
+	for i := range plan {
 		origin := plan[i].originName
 		target := plan[i].targetName
 		if origin == "" || target == "" || origin == target {
+			continue
+		}
+		fid := strings.TrimSpace(nameToFID[origin])
+		if fid == "" {
+			// 名字在目标目录里找不到：说明这个文件没转存成功，
+			// 或者名字被上游改过。跳过而不是拿 savedFIDs[i] 硬凑。
+			unresolved++
 			continue
 		}
 		e.line(fmt.Sprintf("重命名: %s -> %s", origin, target))
@@ -578,21 +614,25 @@ func (e *DramaExecutor) renameFiles(ctx context.Context, savedFIDs []string, pla
 			e.line(fmt.Sprintf("FAIL: 重命名失败 %s err=%v", origin, err))
 		}
 		attempted = append(attempted, attempt{fid: fid, origin: origin, target: target})
+		renamed = append(renamed, plan[i])
 	}
 
+	if unresolved > 0 {
+		e.line(fmt.Sprintf("INFO: %d 个文件在目标目录里找不到对应名字，跳过重命名", unresolved))
+	}
 	if len(attempted) == 0 {
-		return
+		return renamed
 	}
-
-	// 二次校验：列出目录检查是否真的改名成功（来自Trae）
-	driver.InvalidateDirCache(ctx, e.task.AccountID, destFID) // 刚发生过改名，缓存必须失效
-	items, _, err := driver.ListFilesCached(ctx, e.drv, e.task.AccountID, destFID)
+	// 二次校验用的名字映射：改名后目录已变，必须重新拉一次，
+	// 而不是复用改名前的 items（那份是旧名字）。
+	driver.InvalidateDirCache(ctx, e.task.AccountID, destFID)
+	after, _, err := driver.ListFilesCached(ctx, e.drv, e.task.AccountID, destFID)
 	if err != nil {
 		e.line("INFO: 重命名校验失败，无法读取目标目录")
-		return
+		return renamed
 	}
-	fidName := make(map[string]string, len(items))
-	for _, it := range items {
+	fidName := make(map[string]string, len(after))
+	for _, it := range after {
 		if !it.IsDir && it.ID != "" {
 			fidName[it.ID] = it.Name
 		}
@@ -610,6 +650,7 @@ func (e *DramaExecutor) renameFiles(ctx context.Context, savedFIDs []string, pla
 		}
 	}
 	e.line(fmt.Sprintf("重命名摘要: total=%d retry_ok=%d retry_failed=%d", len(attempted), retryOK, retryFail))
+	return renamed
 }
 
 // syncSubdirs 同步子目录：匹配 update_subdir 正则的分享子目录会被转存/同步（来自Trae）
