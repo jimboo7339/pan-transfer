@@ -164,11 +164,6 @@ async function doLogin() {
       <div class="sidebar-footer">
         <div class="mb-8 flex" style="gap: 6px; align-items: center">
           <ThemeToggle />
-          <span class="flex-1"></span>
-          <button class="btn btn-icon btn-ghost" title="键盘快捷键（?）"
-            aria-label="键盘快捷键" @click="showHotkeysHelp = true">
-            <span style="font-size: 13px; font-weight: 600">?</span>
-          </button>
         </div>
         <div class="sidebar-search-hint">
           <button class="btn btn-sm sidebar-search-btn" @click="paletteRef && paletteRef.open()">
@@ -178,8 +173,21 @@ async function doLogin() {
             <kbd>⌘K</kbd>
           </button>
         </div>
-        <div>PanTransfer v{{ session.version }}</div>
-        <div style="margin-top: 3px">夸克 / 光鸭 · 本机轻量部署</div>
+        <!-- 快捷键帮助：单独一行、带键盘图标与文字。
+             早先这里是一个裸的「?」字符挤在主题切换器旁边，
+             看起来像没渲染完的图标，用户无法判断用途。
+             现在明确写成「快捷键」并用键盘图标，扫读即懂。 -->
+        <button class="btn btn-sm sidebar-shortcut-btn" @click="showHotkeysHelp = true"
+          title="查看所有键盘快捷键">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="5" width="20" height="14" rx="2" />
+            <path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M10 13h.01M14 13h.01M18 13h.01M8 16h8" />
+          </svg>
+          快捷键
+        </button>
+        <div class="sidebar-version">PanTransfer v{{ session.version }}</div>
+        <div class="sidebar-build">夸克 / 光鸭 · 本机轻量部署</div>
       </div>
     </aside>
 
