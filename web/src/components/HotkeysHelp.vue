@@ -45,6 +45,12 @@ function close() {
       先按 <kbd class="hotkeys-kbd-inline">g</kbd>，再按对应字母（1.2 秒内）。
       输入框内不会触发任何快捷键，避免打字时误触。
     </div>
+    <div class="hotkeys-note hotkeys-note-warn">
+      <b>已在当前页时按 <kbd class="hotkeys-kbd-inline">g</kbd> + 对应字母</b>
+      不会报错也不会跳转（目标就是当前页），只在左下角提示一句。
+      仪表盘是默认页，所以 <kbd class="hotkeys-kbd-inline">g</kbd> <kbd class="hotkeys-kbd-inline">d</kbd>
+      在刚打开面板时看起来"没反应"——那是正常的。
+    </div>
     <template #footer>
       <button class="btn btn-primary" @click="close">知道了</button>
     </template>
@@ -75,5 +81,11 @@ function close() {
   margin-top: 14px; padding: 10px 12px; border-radius: 8px;
   background: var(--surface-2); font-size: 12.5px; color: var(--text-2);
   line-height: 1.7;
+}
+/* 补充说明：比主提示更醒目一点，但不用警告色（这不是错误，是预期行为） */
+.hotkeys-note-warn {
+  margin-top: 8px;
+  background: var(--primary-soft);
+  color: var(--text-2);
 }
 </style>

@@ -26,6 +26,19 @@ import { useRouter } from 'vue-router'
 // 是否显示快捷键帮助。App 层会渲染一个面板。
 const showHelp = ref(false)
 
+// 页面名称：用于「已在 xx 页」的提示文案。
+const PAGE_NAMES = {
+  '/': '仪表盘',
+  '/tasks': '转存任务',
+  '/logs': '运行日志',
+  '/accounts': '网盘账号',
+  '/rules': '命名规则',
+  '/settings': '设置',
+}
+function pageName(path) {
+  return PAGE_NAMES[path] || path
+}
+
 const isTyping = (el) => {
   if (!el) return false
   const tag = el.tagName
@@ -38,8 +51,14 @@ const isTyping = (el) => {
 //
 // 返回 showHelp 而不是在模块里维护状态：这样组件卸载时能把监听摘干净，
 // 也不会出现"路由切换后快捷键还在打旧页面"的问题。
-export function useHotkeys() {
+export function useHotkeys(options = {}) {
   const router = useRouter()
+
+  // onFeedback 由 App 层注入（用来弹 toast）。
+  //
+  // 为什么用回调而不是直接 import toast：hotkeys.js 是纯逻辑模块，
+  // 不该依赖全局 provide；且测试时可以传一个只记录不调 UI 的实现。
+  const onFeedback = options.onFeedback
 
   // g 前缀序列的状态：记下按键时间，1.2s 内没接下一个键就重置。
   let pendingG = 0
@@ -57,14 +76,23 @@ export function useHotkeys() {
       const routes = {
         d: '/', t: '/tasks', l: '/logs', a: '/accounts', r: '/rules', s: '/settings',
       }
-      const to = routes[e.key.toLowerCase()]
+      const key = e.key.toLowerCase()
+      const to = routes[key]
       pendingG = 0
-      if (to) {
-        router.push(to)
+      if (!to) {
+        // 按了 g 但第二个键不认识：消耗掉这次输入，避免后续误判。
+        return false
+      }
+      // 已在目标页时 router.push 是 no-op，界面完全没反应——
+      // 用户会以为"快捷键坏了"（仪表盘是默认页，g d 最容易踩到）。
+      // 这里给一条 toast 明确告知，而不是静默无响应。
+      const cur = router.currentRoute.value.path
+      if (cur === to) {
+        onFeedback?.(`已在「${pageName(to)}」`, 'info')
         return true
       }
-      // 按了 g 但第二个键不认识：消耗掉这次输入，避免后续误判。
-      return false
+      router.push(to)
+      return true
     }
     if (e.key === 'g') {
       pendingG = Date.now()

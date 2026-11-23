@@ -6,11 +6,7 @@ import ConfirmDialog from './components/ConfirmDialog.vue'
 import CommandPalette from './components/CommandPalette.vue'
 import HotkeysHelp from './components/HotkeysHelp.vue'
 import { authApi, setToken } from './api'
-// 快捷键在 setup 外注册：它需要在应用挂载时就监听，
-// 而不是等某个组件渲染。hotkeys.js 内部自注册并导出 showHelp。
 import { useHotkeys } from './hotkeys'
-
-const { showHelp: showHotkeysHelp } = useHotkeys()
 
 const session = inject('session')
 const refreshSession = inject('refreshSession')
@@ -20,6 +16,20 @@ const toast = inject('toast')
 // 静默渲染空列表），后果是所有 toast 都发出去但一条也看不见。
 const toasts = inject('toasts')
 const route = useRoute()
+
+// 快捷键：useHotkeys 必须在 setup 内调用（它内部要用 useRouter / onMounted）。
+//
+// 早先 hotkeys.js 在模块顶层直接调这两个，结果是：
+//   - useRouter() 返回 undefined → 六个 g 前缀快捷键全部 TypeError；
+//   - onMounted 无活跃实例 → 监听器从未注册，n / ? / Esc 全部无响应。
+// 且不报错（生产模式静默失败），所以必须保持在组件 setup 内调用。
+//
+// onFeedback 注入 toast：快捷键「已在当前页」时给一条提示。
+// 仪表盘是默认页，g d 在这里按下去 router.push 是 no-op、
+// 界面完全没反应，用户会以为快捷键坏了——这就是用户遇到的困惑。
+const { showHelp: showHotkeysHelp } = useHotkeys({
+  onFeedback: (msg) => toast(msg, 'info', 2000),
+})
 
 const password = ref('')
 const busy = ref(false)
