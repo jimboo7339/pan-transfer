@@ -1,17 +1,39 @@
 <script setup>
 // 设置：通知渠道管理 + 全局开关 + 访问密码 + 数据备份。
-import Modal from '../components/Modal.vue'
+//
+// 这个文件是 6 个互不相关的区块的容器，每个区块已拆成
+// components/settings/ 下的独立组件：
+//
+//   SettingsNotify.vue      通知渠道（列表 + 编辑弹层）
+//   SettingsSchedule.vue    调度配置（开关 + cron + 旧版时间/更新日）
+//   SettingsPolicy.vue      转存策略（去重 / 保留天数 / 请求间隔）
+//   SettingsCategory.vue    任务分类与回调（列表 + 编辑弹层 + 日志 + 帮助）
+//   SettingsAccess.vue      访问控制（密码 / 退出登录）
+//   SettingsBackup.vue      数据备份与配置迁移
+//
+// 为什么拆：这个文件曾同时承载 6 个业务域，改任何一个都要在 800 多行里
+// 找位置，且任何两个域的状态混在同一个 setup 作用域里，
+// 变量名互相干扰（chForm / catForm / pwd / backups…）。
+//
+// 拆分后容器只保留：
+//   - 共享的 settings 对象（后端返回的全局配置）
+//   - persist(patch)：唯一的写库入口，返回是否成功
+//   - 加载态 / 失败态（整个页面只有一个 spinner / 一个 ErrorState）
+//
+// 各子组件通过 props 拿 settings 与 saving，通过 emit 请求保存，
+// 自己管自己的弹层与临时表单状态——这正是"改通知渠道不会碰到备份代码"的前提。
+import { ref, reactive, inject, onMounted } from 'vue'
 import ErrorState from '../components/ErrorState.vue'
-import WeekPicker from '../components/WeekPicker.vue'
-import ConfigTransfer from '../components/ConfigTransfer.vue'
-import { settingsApi, notifyApi, authApi, cronApi, categoryApi, backupApi, fmtTime, fmtSize, setToken } from '../api'
-import { CRON_PRESETS, cronToText } from '../cron'
-import { ref, reactive, inject, onMounted, watch, computed } from 'vue'
+import SettingsNotify from '../components/settings/SettingsNotify.vue'
+import SettingsSchedule from '../components/settings/SettingsSchedule.vue'
+import SettingsPolicy from '../components/settings/SettingsPolicy.vue'
+import SettingsCategory from '../components/settings/SettingsCategory.vue'
+import SettingsAccess from '../components/settings/SettingsAccess.vue'
+import SettingsBackup from '../components/settings/SettingsBackup.vue'
+import { settingsApi } from '../api'
 
 const toast = inject('toast')
-const session = inject('session')
 const refreshSession = inject('refreshSession')
-const confirmDialog = inject('confirmDialog')
 
 const loading = ref(true)
 const saving = ref(false)
@@ -26,182 +48,6 @@ const settings = reactive({
   request_interval_ms: 300,
   auth_enabled: false,
 })
-
-const globalCronNext = ref('')
-const globalCronError = ref('')
-
-// 全局 cron 校验：防抖 300ms + 请求序号守卫。
-//
-// 与 TaskEdit 的 cron 校验同一套理由：
-//   - 无防抖时每敲一个字符发一次请求，`0 */2 * * *` 会发 11 个，
-//     在 SQLite 单连接下排队拖慢其它 API；
-//   - 无序号守卫时先发的请求后返回会覆盖新结果，
-//     用户看到的"下次执行时间"是上一次输入算出来的。
-let globalCronTimer = null
-let globalCronSeq = 0
-
-watch(() => settings.schedule_cron, (v) => {
-  globalCronNext.value = ''; globalCronError.value = ''
-  if (globalCronTimer) { clearTimeout(globalCronTimer); globalCronTimer = null }
-  if (!v || !v.trim()) return
-  const expr = v.trim()
-  if (expr.split(/\s+/).length !== 5) { globalCronError.value = '需要 5 个字段：分 时 日 月 周'; return }
-
-  const seq = ++globalCronSeq
-  globalCronTimer = setTimeout(() => {
-    cronApi.next(expr)
-      .then(r => { if (seq === globalCronSeq) globalCronNext.value = r.next_run })
-      .catch(e => { if (seq === globalCronSeq) globalCronError.value = e.message })
-  }, 300)
-})
-
-const channelTypes = [
-  { value: 'telegram', label: 'Telegram Bot' },
-  { value: 'bark', label: 'Bark (iOS)' },
-  { value: 'ntfy', label: 'ntfy' },
-  { value: 'wecom_bot', label: '企业微信机器人' },
-  { value: 'feishu_bot', label: '飞书机器人' },
-  { value: 'dingtalk_bot', label: '钉钉机器人' },
-  { value: 'webhook', label: '自定义 Webhook' },
-]
-
-const channelFields = {
-  telegram: [
-    { key: 'bot_token', label: 'Bot Token', ph: '123456:ABC-DEF…' },
-    { key: 'chat_id', label: 'Chat ID', ph: '频道/群组/用户 ID' },
-    { key: 'api_base', label: 'API 反代（可选）', ph: 'https://api.telegram.org' },
-  ],
-  bark: [
-    { key: 'device_key', label: 'Device Key', ph: 'Bark App 中的推送 Key' },
-    { key: 'server', label: '自建服务（可选）', ph: 'https://api.day.app' },
-    { key: 'sound', label: '提示音（可选）', ph: 'minuet' },
-  ],
-  ntfy: [
-    { key: 'topic_url', label: 'Topic URL', ph: 'https://ntfy.sh/my-topic' },
-    { key: 'username', label: '用户名（可选）' },
-    { key: 'password', label: '密码（可选）' },
-  ],
-  wecom_bot: [{ key: 'webhook', label: 'Webhook 地址', ph: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=…' }],
-  feishu_bot: [{ key: 'webhook', label: 'Webhook 地址', ph: 'https://open.feishu.cn/open-apis/bot/v2/hook/…' }],
-  dingtalk_bot: [{ key: 'webhook', label: 'Webhook 地址', ph: 'https://oapi.dingtalk.com/robot/send?access_token=…' }],
-  webhook: [
-    { key: 'url', label: 'Webhook URL' },
-    { key: 'body_template', label: '消息模板（可选）', ph: '预留 {message} 占位符' },
-  ],
-}
-
-const showChannel = ref(false)
-const editingChannel = ref(false)
-const testingChannel = ref(false)
-const chForm = reactive({ id: '', type: 'telegram', name: '', enabled: true, config: {} })
-
-// ---------- 任务分类与回调 ----------
-const categories = ref([])
-const showCatEdit = ref(false)
-const editingCat = ref(false)
-const savingCat = ref(false)
-const testingCat = ref(false)
-const catTestResult = ref(null)
-const showCatHelp = ref(false)
-const showCatLogs = ref(false)
-const catLogs = ref([])
-const catLogsLoading = ref(false)
-const logsCat = ref(null)
-const catForm = reactive({
-  id: 0, name: '', callback_enabled: false, callback_mode: 'round',
-  callback_method: 'POST', callback_url: '', callback_headers: '', callback_body: '',
-  callback_timeout_sec: 15, skip_zero: false, sort_order: 0,
-})
-
-async function loadCategories() {
-  try {
-    categories.value = (await categoryApi.list()) || []
-  } catch (e) {
-    toast(e.message, 'error')
-  }
-}
-
-function openCatNew() {
-  editingCat.value = false
-  Object.assign(catForm, {
-    id: 0, name: '', callback_enabled: false, callback_mode: 'round',
-    callback_method: 'POST', callback_url: '', callback_headers: '', callback_body: '',
-    callback_timeout_sec: 15, skip_zero: false, sort_order: categories.value.length,
-  })
-  catTestResult.value = null
-  showCatEdit.value = true
-}
-
-function openCatEdit(c) {
-  editingCat.value = true
-  Object.assign(catForm, {
-    id: c.id, name: c.name, callback_enabled: c.callback_enabled, callback_mode: c.callback_mode,
-    callback_method: c.callback_method, callback_url: c.callback_url,
-    callback_headers: c.callback_headers || '', callback_body: c.callback_body || '',
-    callback_timeout_sec: c.callback_timeout_sec || 15, skip_zero: !!c.skip_zero, sort_order: c.sort_order || 0,
-  })
-  catTestResult.value = null
-  showCatEdit.value = true
-}
-
-async function saveCat() {
-  if (!catForm.name.trim()) { toast('请填写分类名称', 'error'); return }
-  savingCat.value = true
-  try {
-    await categoryApi.save({ ...catForm, name: catForm.name.trim() })
-    toast(editingCat.value ? '分类已更新' : '分类已创建', 'success')
-    showCatEdit.value = false
-    loadCategories()
-  } catch (e) {
-    toast(e.message, 'error')
-  } finally {
-    savingCat.value = false
-  }
-}
-
-async function removeCat(c) {
-  const ok = await confirmDialog({
-    title: '删除任务分类',
-    body: `删除分类「${c.name}」？`,
-    warn: `其下 ${c.task_count} 个任务将变为未分类，该分类的回调配置与回调日志会一并删除。`,
-    confirmText: '删除',
-    variant: 'danger',
-  })
-  if (!ok) return
-  try {
-    await categoryApi.remove(c.id)
-    toast('分类已删除', 'success')
-    loadCategories()
-  } catch (e) {
-    toast(e.message, 'error')
-  }
-}
-
-async function testCat() {
-  if (!catForm.id) { toast('请先保存分类再测试', 'error'); return }
-  testingCat.value = true
-  catTestResult.value = null
-  try {
-    catTestResult.value = await categoryApi.test(catForm.id)
-  } catch (e) {
-    catTestResult.value = { ok: false, error: e.message }
-  } finally {
-    testingCat.value = false
-  }
-}
-
-async function openCatLogs(c) {
-  logsCat.value = c
-  showCatLogs.value = true
-  catLogsLoading.value = true
-  try {
-    catLogs.value = (await categoryApi.logs(c.id)) || []
-  } catch (e) {
-    toast(e.message, 'error')
-  } finally {
-    catLogsLoading.value = false
-  }
-}
 
 // reload 加载全局设置。
 //
@@ -221,69 +67,17 @@ async function reload() {
   } finally {
     loading.value = false
   }
-  // 分类与备份是次要信息，失败不阻塞主表单
-  loadCategories()
-  loadBackups()
 }
 onMounted(reload)
 
-function typeLabel(v) { return channelTypes.find(t => t.value === v)?.label || v }
-
-function openAddChannel() {
-  editingChannel.value = false
-  Object.assign(chForm, { id: 'ch_' + Date.now(), type: 'telegram', name: '', enabled: true, config: {} })
-  showChannel.value = true
-}
-
-function openEditChannel(c) {
-  editingChannel.value = true
-  Object.assign(chForm, JSON.parse(JSON.stringify(c)))
-  showChannel.value = true
-}
-
-function onTypeChange() { chForm.config = {} }
-
-async function saveChannel() {
-  if (!chForm.name.trim()) { toast('请填写渠道名称', 'error'); return }
-  const list = [...settings.notify_channels]
-  const idx = list.findIndex(c => c.id === chForm.id)
-  if (idx >= 0) list[idx] = { ...chForm }
-  else list.push({ ...chForm })
-  // 保存失败时保持弹层打开：否则用户填的渠道配置全部丢失，
-  // 只看到一条转瞬即逝的错误提示。
-  const ok = await persist({ notify_channels: list })
-  if (ok) showChannel.value = false
-}
-
-async function removeChannel(c) {
-  const ok = await confirmDialog({
-    title: '删除通知渠道',
-    body: `确定删除通知渠道「${c.name}」？`,
-    warn: '删除后该渠道不再接收任何转存通知。',
-    confirmText: '删除',
-    variant: 'danger',
-  })
-  if (!ok) return
-  await persist({ notify_channels: settings.notify_channels.filter(x => x.id !== c.id) })
-}
-
-async function testChannel() {
-  testingChannel.value = true
-  try {
-    await notifyApi.test({ ...chForm })
-    toast('测试消息已发送，请查收', 'success')
-  } catch (e) {
-    toast(e.message, 'error')
-  } finally {
-    testingChannel.value = false
-  }
-}
-
 // persist 保存一批设置，成功返回 true、失败返回 false。
 //
-// 为什么返回布尔而不是静默吞异常：调用方（saveChannel / removeChannel）
-// 需要在失败后**保持弹层打开**，否则用户填的整个渠道配置会丢失，
+// 为什么返回布尔而不是静默吞异常：调用方（如通知渠道编辑）需要在失败后
+// **保持弹层打开**，否则用户填的整个渠道配置会丢失，
 // 只看到一条转瞬即逝的红色 toast。
+//
+// 这是**唯一**的写库入口：所有子组件的保存都走这里，
+// 因此"保存后回填最新值"这件事只有一处实现。
 async function persist(patch) {
   saving.value = true
   try {
@@ -299,132 +93,18 @@ async function persist(patch) {
   }
 }
 
-function saveSchedule() {
-  // 用可选链：后端若返回 null（字段缺失）会直接抛 TypeError，
-  // 而 saveSchedule 没有 try-catch，点"保存调度配置"就崩。
-  const cron = (settings.schedule_cron || '').trim()
-  if (settings.schedule_enabled === 'on' && !cron && !settings.schedule_time) {
-    toast('全局调度开启时需要填写 cron 表达式或运行时间', 'error')
-    return
-  }
-  persist({
-    schedule_enabled: settings.schedule_enabled,
-    schedule_cron: cron,
-    schedule_time: settings.schedule_time || '',
-    schedule_week: settings.schedule_week || '',
-  })
-}
-
-// 访问密码
-const pwdModal = ref(false)
-const pwd = ref('')
-const pwd2 = ref('')
-// 与界面文案「至少 4 位」保持一致。
+// applySave 是子组件统一的保存入口：patch 是要写的字段，done 是可选的
+// 成功回调（子组件用它关闭自己的弹层）。
 //
-// 早先只校验两次输入一致，不校验长度：用户填 1 位密码也能保存成功，
-// 而后端登录限流是 5 次 / 5 分钟——1 位口令在限流下也能被很快试出来。
-// 文案承诺了约束，代码就该真的执行。
-const MIN_PASSWORD_LEN = 4
-
-async function savePassword() {
-  if (pwd.value !== pwd2.value) { toast('两次输入的密码不一致', 'error'); return }
-  if (pwd.value.length < MIN_PASSWORD_LEN) {
-    toast(`密码至少 ${MIN_PASSWORD_LEN} 位`, 'error')
-    return
-  }
-  await persist({ password: pwd.value })
-  pwd.value = pwd2.value = ''
-  pwdModal.value = false
-  refreshSession()
-}
-async function clearPassword() {
-  const ok = await confirmDialog({
-    title: '关闭访问密码',
-    body: '关闭后任何能访问本服务的人都可以操作你的网盘账号。',
-    warn: '若服务暴露在局域网或公网（含反向代理），这一步等于把账号控制权开放给所有人。',
-    confirmText: '关闭密码',
-    variant: 'danger',
+// 为什么让子组件传 done 而不是各自调 API：
+// 「保存后回填最新值」这件事只有 persist 一处实现，
+// 子组件不需要知道 settingsApi 的存在。
+function applySave(patch, done) {
+  return persist(patch).then((ok) => {
+    if (ok && typeof done === 'function') done()
+    return ok
   })
-  if (!ok) return
-  await persist({ password: '' })
-  pwdModal.value = false
-  refreshSession()
 }
-
-// ---------- 登出 ----------
-// 服务端会作废此前签发的全部会话（token 是无状态的，只清 Cookie 无法让
-// 已经泄露的 token 失效）。因此登出后必须清掉本地 token 并回到登录态。
-async function doLogout() {
-  const ok = await confirmDialog({
-    title: '退出登录',
-    body: '退出后需要重新输入访问密码。',
-    warn: '此操作会同时作废此前签发的所有会话令牌（包括其他设备上的登录）。',
-    confirmText: '退出',
-  })
-  if (!ok) return
-  try {
-    await authApi.logout()
-  } catch (e) {
-    // 服务端不可达时也要本地登出：留着 token 只会反复 401。
-    toast('服务端登出失败，已本地退出：' + e.message, 'error')
-  }
-  setToken('')
-  await refreshSession()
-}
-
-// ---------- 数据备份 ----------
-const backups = ref([])
-const backupsLoading = ref(false)
-const backingUp = ref(false)
-// 配置导入/导出弹层。
-const configRef = ref(null)
-
-async function loadBackups() {
-  backupsLoading.value = true
-  try {
-    const r = await backupApi.list()
-    backups.value = r?.backups || []
-  } catch (e) {
-    toast(e.message, 'error')
-  } finally {
-    backupsLoading.value = false
-  }
-}
-
-async function createBackup() {
-  backingUp.value = true
-  try {
-    const r = await backupApi.create()
-    toast(r?.message || '备份已完成', 'success', 5000)
-    loadBackups()
-  } catch (e) {
-    toast(e.message, 'error')
-  } finally {
-    backingUp.value = false
-  }
-}
-
-async function restoreBackup(b) {
-  const ok = await confirmDialog({
-    title: '从备份还原',
-    body: `确定用备份「${b.name}」覆盖当前数据库？`,
-    warn: '还原会丢弃还原点之后的所有任务、运行记录与转存历史，且需要重启调度。此操作不可撤销。',
-    confirmText: '确认还原',
-    variant: 'danger',
-    requireText: b.name,
-  })
-  if (!ok) return
-  try {
-    await backupApi.restore(b.name)
-    toast('已还原，正在重新加载…', 'success', 5000)
-    // 还原后服务端换掉了数据库句柄，刷新一次拿到新状态。
-    setTimeout(() => window.location.reload(), 1500)
-  } catch (e) {
-    toast(e.message, 'error', 6000)
-  }
-}
-
-const newestBackup = computed(() => backups.value[0] || null)
 </script>
 
 <template>
@@ -444,435 +124,23 @@ const newestBackup = computed(() => backups.value[0] || null)
       hint="设置加载失败，为避免用默认值覆盖你的真实配置，已禁用保存。请确认服务正在运行后重试。" />
 
     <template v-else>
-      <!-- 通知 -->
-      <div class="card card-pad mb-16">
-        <div class="flex mb-16">
-          <div>
-            <div class="card-title" style="margin-bottom: 2px">通知推送</div>
-            <div class="page-desc">有新文件转存或整次运行失败时推送；本次 0 个新文件（无更新 / 全部已转存）时静默，不推送空跑结果。</div>
-          </div>
-          <span class="flex-1"></span>
-          <button class="btn btn-primary" @click="openAddChannel">＋ 添加渠道</button>
-        </div>
-        <div v-if="!settings.notify_channels.length" class="empty" style="padding: 26px">
-          <div class="empty-hint">尚未配置通知渠道（支持 Telegram / Bark / ntfy / 企业微信 / 飞书 / 钉钉 / Webhook）</div>
-        </div>
-        <div v-else style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px">
-          <div v-for="c in settings.notify_channels" :key="c.id" class="channel-card">
-            <div class="flex">
-              <div style="font-weight: 600">{{ c.name }}</div>
-              <span class="tag">{{ typeLabel(c.type) }}</span>
-              <span class="flex-1"></span>
-              <span class="badge" :class="c.enabled ? 'badge-success' : 'badge-gray'"><span class="dot"></span>{{ c.enabled ? '启用' : '停用' }}</span>
-            </div>
-            <div class="flex">
-              <button class="btn btn-sm" @click="openEditChannel(c)">编辑</button>
-              <span class="spacer"></span>
-              <button class="btn btn-sm btn-danger btn-ghost" @click="removeChannel(c)">删除</button>
-            </div>
-          </div>
-        </div>
-      </div>
+      <!-- 通知渠道：自己管 chForm / showChannel，保存走 emit -->
+      <SettingsNotify :settings="settings" :saving="saving"
+        @save="applySave" />
 
-      <!-- 调度配置 -->
-      <div class="card card-pad mb-16">
-        <div class="card-title">调度配置</div>
-        <div class="page-desc" style="margin-top: -6px; margin-bottom: 14px">
-          任务里调度模式选「跟随全局」时使用此处配置；任务自身选「自定义定时」的按任务配置执行。
-        </div>
-        <div class="field" style="max-width: 420px">
-          <div class="field-label">全局定时调度</div>
-          <div class="flex">
-            <label class="switch">
-              <input type="checkbox" :checked="settings.schedule_enabled !== 'off'"
-                @change="settings.schedule_enabled = $event.target.checked ? 'on' : 'off'" />
-              <span class="track"></span>
-            </label>
-            <span class="page-desc" style="margin: 0">{{ settings.schedule_enabled === 'off' ? '已关闭：所有任务仅手动运行' : '开启中：到点自动运行「跟随全局」的任务' }}</span>
-          </div>
-          <!-- 开关不再立即落库：早先开关一改就保存，而下面的 cron 要按
-               「保存调度配置」才落库。用户关掉开关再打开，会发现 cron
-               还是旧值（从未保存过），以为配置丢了。
-               现在整张卡片统一走底部那一个保存按钮。 -->
-        </div>
-        <div class="field" style="max-width: 560px">
-          <div class="field-label">Cron 表达式（分 时 日 月 周）</div>
-          <input class="input mono" v-model="settings.schedule_cron" placeholder="例如 0 */2 * * *  = 每 2 小时" :disabled="settings.schedule_enabled === 'off'" />
-          <div class="flex mt-8" style="flex-wrap: wrap; gap: 6px">
-            <button v-for="p in CRON_PRESETS" :key="p.value" class="btn btn-sm" :disabled="settings.schedule_enabled === 'off'" @click="settings.schedule_cron = p.value">{{ p.label }}</button>
-          </div>
-          <div v-if="globalCronError" class="field-hint text-danger" style="margin-top: 6px">{{ globalCronError }}</div>
-          <div v-else-if="globalCronNext" class="field-hint" style="margin-top: 6px">下次执行：{{ globalCronNext }} · {{ cronToText(settings.schedule_cron) }}</div>
-          <div v-else-if="settings.schedule_cron" class="field-hint text-warn" style="margin-top: 6px">表达式格式有误，暂无法计算下次执行时间。</div>
-          <div class="field-hint" style="margin-top: 6px">示例：每 2 小时 <code class="mono">0 */2 * * *</code>；每天 08:00 <code class="mono">0 8 * * *</code>；周一到五 20:30 <code class="mono">30 20 * * 1-5</code></div>
-        </div>
-        <details class="mt-8" style="max-width: 560px">
-          <summary style="cursor: pointer; font-size: 12.5px; color: var(--text-3); user-select: none">旧版配置（运行时间 + 更新日，兼容保留）</summary>
-          <div class="form-row mt-8">
-            <div class="field">
-              <div class="field-label">运行时间</div>
-              <input class="input" type="time" v-model="settings.schedule_time" :disabled="settings.schedule_enabled === 'off'" />
-            </div>
-            <div class="field">
-              <div class="field-label">更新日（不选 = 每天）</div>
-              <WeekPicker v-model="settings.schedule_week" />
-            </div>
-          </div>
-          <div class="field-hint">填了「Cron 表达式」时以它为准；否则回退到这里的运行时间 + 更新日。Cron 优先。</div>
-        </details>
-        <button class="btn btn-primary" :disabled="saving" @click="saveSchedule">保存调度配置</button>
-        <div class="field-hint mt-8">到点后有 1–3 分钟随机延迟；截止日期在任务里单独配置。</div>
-      </div>
+      <SettingsSchedule :settings="settings" :saving="saving"
+        @save="applySave" @invalid="(msg) => toast(msg, 'error')" />
 
-      <!-- 全局策略 -->
-      <div class="card card-pad mb-16">
-        <div class="card-title">转存策略</div>
-        <div class="field" style="max-width: 460px">
-          <div class="field-label">跳过已转存历史（默认值）</div>
-          <select class="select" v-model="settings.skip_history_global" @change="persist({ skip_history_global: settings.skip_history_global })">
-            <option value="on">开启：按转存历史去重（推荐）</option>
-            <option value="off">关闭：仅按目标目录现有文件去重</option>
-          </select>
-          <div class="field-hint">任务里选择「跟随全局」时使用此处取值。</div>
-        </div>
-        <div class="field" style="max-width: 460px">
-          <div class="field-label">运行记录保留天数</div>
-          <input class="input" type="number" min="0" v-model="settings.run_retention_days"
-            @change="persist({ run_retention_days: String(parseInt(settings.run_retention_days, 10) || 0) })" />
-          <div class="field-hint">超期的运行记录每天自动清理（每个任务至少保留最近 50 条）；填 0 = 永久保留。转存历史（去重依据）不受影响。</div>
-        </div>
-        <div class="field" style="max-width: 460px; margin-bottom: 0">
-          <div class="field-label">账号请求间隔（毫秒）</div>
-          <input class="input" type="number" min="0" max="60000" step="50"
-            v-model.number="settings.request_interval_ms"
-            @change="persist({ request_interval_ms: Number(settings.request_interval_ms) || 0 })" />
-          <div class="field-hint">
-            同一账号的任意两次网盘请求之间至少间隔这么久，是降低账号被风控概率的第一道闸。
-            <b>默认 300</b>；填 0 表示不做间隔（不推荐）。调大会显著拉长大批量转存耗时
-            （100 个文件 × 1000ms ≈ 多等 100 秒）。
-          </div>
-        </div>
-      </div>
+      <SettingsPolicy :settings="settings" :saving="saving"
+        @save="applySave" />
 
-      <!-- 任务分类与回调 -->
-      <div class="card card-pad mb-16">
-        <div class="flex mb-16">
-          <div>
-            <div class="flex" style="margin-bottom: 2px">
-              <div class="card-title" style="margin-bottom: 0">任务分类与回调</div>
-              <button class="btn btn-sm btn-ghost" style="height: 24px" @click="showCatHelp = true">❓ 使用说明</button>
-            </div>
-            <div class="page-desc">给任务分组；分类可配置转存完成后回调外部接口，通知其他系统处理文件。</div>
-          </div>
-          <span class="flex-1"></span>
-          <button class="btn btn-primary" @click="openCatNew">＋ 添加分类</button>
-        </div>
-        <div v-if="!categories.length" class="empty" style="padding: 22px">
-          <div class="empty-hint">还没有分类。创建分类并在任务编辑里选择，即可按分类触发回调。</div>
-        </div>
-        <div v-else style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px">
-          <div v-for="c in categories" :key="c.id" class="channel-card">
-            <div class="flex">
-              <div style="font-weight: 600">{{ c.name }}</div>
-              <span class="tag">{{ c.callback_mode === 'per_task' ? '单任务回调' : '轮次回调' }}</span>
-              <span class="flex-1"></span>
-              <span class="badge" :class="c.callback_enabled ? 'badge-success' : 'badge-gray'"><span class="dot"></span>{{ c.callback_enabled ? '回调开启' : '仅分组' }}</span>
-            </div>
-            <div class="muted mono ellipsis" style="font-size: 11.5px; margin-top: 6px" :title="c.callback_url">
-              {{ c.callback_enabled ? c.callback_method + ' ' + (c.callback_url || '未配置 URL') : '未启用回调' }}
-            </div>
-            <div class="flex" style="margin-top: 8px; gap: 6px; flex-wrap: wrap">
-              <span class="muted" style="font-size: 12px">{{ c.task_count }} 个任务</span>
-              <template v-if="c.last_callback_at">
-                <span class="badge" :class="c.last_callback_ok ? 'badge-success' : 'badge-danger'" style="height: 18px; font-size: 11px">
-                  <span class="dot"></span>{{ c.last_callback_ok ? '上次回调成功' : '上次回调失败' }} {{ c.last_callback_at }}
-                </span>
-              </template>
-              <span class="flex-1"></span>
-              <button class="btn btn-sm" @click="openCatEdit(c)">编辑</button>
-              <button class="btn btn-sm" @click="openCatLogs(c)">回调日志</button>
-              <button class="btn btn-sm btn-danger btn-ghost" @click="removeCat(c)">删除</button>
-            </div>
-          </div>
-        </div>
-      </div>
+      <!-- 分类与回调：自己拉列表、自己管 3 个弹层 -->
+      <SettingsCategory />
 
-      <!-- 访问控制 -->
-      <div class="card card-pad mb-16">
-        <div class="card-title">访问控制</div>
-        <div class="flex">
-          <div class="flex-1">
-            <div style="font-weight: 600; font-size: 13.5px">访问密码</div>
-            <div class="page-desc">{{ settings.auth_enabled ? '已开启：打开管理台需要输入密码。' : '未开启：本机部署可保持关闭。' }}</div>
-          </div>
-          <button class="btn" @click="pwdModal = true">{{ settings.auth_enabled ? '修改密码' : '设置密码' }}</button>
-          <button v-if="settings.auth_enabled" class="btn btn-danger" @click="clearPassword">关闭</button>
-        </div>
-        <div v-if="settings.auth_enabled" class="field-hint mt-16" style="margin-bottom: 12px">
-          密码以 argon2id 哈希存储；修改密码会作废此前签发的所有会话。
-        </div>
-        <div v-if="settings.auth_enabled" class="flex">
-          <button class="btn btn-sm" @click="doLogout">退出登录</button>
-          <span class="field-hint" style="margin-top: 0">
-            会同时作废所有设备上的会话令牌，用于「怀疑密码泄露」时强制下线。
-          </span>
-        </div>
-      </div>
+      <SettingsAccess :settings="settings"
+        @save="applySave" @refresh-session="refreshSession" />
 
-      <!-- 数据备份 -->
-      <div class="card card-pad">
-        <div class="flex mb-16">
-          <div>
-            <div class="card-title" style="margin-bottom: 2px">数据备份</div>
-            <div class="page-desc">
-              备份包含账号凭据、任务、运行记录与转存历史（<b>凭据是加密后的密文</b>，
-              但与主密钥一起才能用；<code class="mono">master.key</code> 也要一并保存）。
-              服务每天自动备份一次，保留最近 7 份。
-            </div>
-          </div>
-          <span class="flex-1"></span>
-          <button class="btn btn-primary" :disabled="backingUp" @click="createBackup">
-            <span v-if="backingUp" class="spinner"></span>
-            <span v-else>＋ 立即备份</span>
-          </button>
-        </div>
-        <div v-if="backupsLoading" class="loading-block"><span class="spinner"></span></div>
-        <div v-else-if="!backups.length" class="empty" style="padding: 22px">
-          <div class="empty-hint">还没有备份。建议立即创建一份（首次启动后 5 分钟也会自动创建）。</div>
-        </div>
-        <div v-else class="table-wrap">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>备份文件</th>
-                <th style="width: 100px">大小</th>
-                <th style="width: 150px">时间</th>
-                <th style="width: 200px">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="b in backups" :key="b.name">
-                <td>
-                  <code class="mono">{{ b.name }}</code>
-                  <span v-if="b.name === newestBackup?.name" class="tag" style="margin-left: 6px">最新</span>
-                </td>
-                <td class="num muted">{{ fmtSize(b.size) }}</td>
-                <td class="num muted">{{ fmtTime(b.mod_time) }}</td>
-                <td>
-                  <a class="btn btn-sm" :href="backupApi.downloadUrl(b.name)" download>下载</a>
-                  <button class="btn btn-sm btn-danger btn-ghost" @click="restoreBackup(b)">还原</button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-
-        <!-- 配置导入 / 导出：与备份是一对，但语义不同 -->
-        <div class="config-transfer-row">
-          <div>
-            <div style="font-weight: 600; font-size: 13.5px">配置迁移</div>
-            <div class="page-desc">
-              把任务、命名规则、分类回调打包成 JSON，用于换机、重装或多机同步。
-              <b>不包含凭据</b>，可安全分享；凭据请走上面的「数据备份」。
-            </div>
-          </div>
-          <span class="flex-1"></span>
-          <button class="btn" @click="configRef.open()">导入 / 导出配置</button>
-        </div>
-      </div>
+      <SettingsBackup />
     </template>
-
-    <!-- 配置导入/导出 -->
-    <ConfigTransfer ref="configRef" />
-
-    <!-- 渠道编辑 -->
-    <Modal v-model="showChannel" :title="editingChannel ? '编辑通知渠道' : '添加通知渠道'">
-      <div class="form-row">
-        <div class="field">
-          <div class="field-label">渠道类型</div>
-          <select class="select" v-model="chForm.type" :disabled="editingChannel" @change="onTypeChange">
-            <option v-for="t in channelTypes" :key="t.value" :value="t.value">{{ t.label }}</option>
-          </select>
-        </div>
-        <div class="field">
-          <div class="field-label">渠道名称 <span class="req">*</span></div>
-          <input class="input" v-model="chForm.name" placeholder="例如：我的 Telegram" />
-        </div>
-      </div>
-      <div v-for="f in channelFields[chForm.type] || []" :key="f.key" class="field">
-        <div class="field-label">{{ f.label }}</div>
-        <input class="input mono" v-model="chForm.config[f.key]" :placeholder="f.ph || ''" />
-      </div>
-      <label class="checkbox">
-        <input type="checkbox" v-model="chForm.enabled" />
-        启用该渠道
-      </label>
-      <template #footer>
-        <button class="btn" :disabled="testingChannel" @click="testChannel">
-          <span v-if="testingChannel" class="spinner"></span>
-          <span v-else>发送测试消息</span>
-        </button>
-        <span class="flex-1"></span>
-        <button class="btn" @click="showChannel = false">取消</button>
-        <button class="btn btn-primary" :disabled="saving" @click="saveChannel">保存</button>
-      </template>
-    </Modal>
-
-    <!-- 密码 -->
-    <Modal v-model="pwdModal" :title="settings.auth_enabled ? '修改访问密码' : '设置访问密码'">
-      <div class="field">
-        <div class="field-label">新密码（至少 4 位）</div>
-        <input class="input" type="password" v-model="pwd" />
-      </div>
-      <div class="field">
-        <div class="field-label">确认密码</div>
-        <input class="input" type="password" v-model="pwd2" @keyup.enter="savePassword" />
-      </div>
-      <template #footer>
-        <button class="btn" @click="pwdModal = false">取消</button>
-        <button class="btn btn-primary" @click="savePassword">保存</button>
-      </template>
-    </Modal>
-
-      <!-- 分类编辑 -->
-      <Modal v-model="showCatEdit" size="lg"
-        :title="editingCat ? '编辑分类' : '添加分类'">
-        <div class="form-row">
-          <div class="field">
-            <div class="field-label">分类名称 <span class="req">*</span></div>
-            <input class="input" v-model="catForm.name" placeholder="例如：Emby 刮削刷新" />
-          </div>
-          <div class="field">
-            <div class="field-label">回调超时（秒）</div>
-            <input class="input" type="number" min="1" max="120" v-model="catForm.callback_timeout_sec" />
-          </div>
-        </div>
-        <label class="checkbox">
-          <input type="checkbox" v-model="catForm.callback_enabled" />
-          启用回调（关闭则仅作为任务分组，不调用接口）
-        </label>
-        <label class="checkbox" v-if="catForm.callback_enabled">
-          <input type="checkbox" v-model="catForm.skip_zero" />
-          0 转存不回调（本次没有任何新文件且无失败时不调用接口；有失败仍会回调）
-        </label>
-        <template v-if="catForm.callback_enabled">
-          <div class="form-row">
-            <div class="field">
-              <div class="field-label">触发时机</div>
-              <select class="select" v-model="catForm.callback_mode">
-                <option value="round">分类轮次完成（该类任务一批跑完后回调一次，汇总结果）</option>
-                <option value="per_task">单任务完成（每个任务转存完成即回调）</option>
-              </select>
-            </div>
-            <div class="field">
-              <div class="field-label">请求方法</div>
-              <select class="select" v-model="catForm.callback_method">
-                <option value="POST">POST（Body 模板）</option>
-                <option value="GET">GET（参数在 URL 上）</option>
-              </select>
-            </div>
-          </div>
-          <div class="field">
-            <div class="field-label">回调 URL <span class="req" v-if="catForm.callback_enabled">*</span>
-              <span class="flex-1"></span>
-              <span class="field-hint" style="margin-top: 0">支持 {变量}，GET 查询值自动 URL 编码；<a style="color: var(--primary); cursor: pointer" @click="showCatHelp = true">查看变量表</a></span>
-            </div>
-            <input class="input mono" v-model="catForm.callback_url"
-              :placeholder="catForm.callback_method === 'GET' ? 'http://192.168.1.10:8080/api/refresh?dir={save_path}&count={transfer_count}' : 'http://192.168.1.10:8080/api/hook'" />
-          </div>
-          <div class="field">
-            <div class="field-label">自定义请求头（JSON，可选）</div>
-            <input class="input mono" v-model="catForm.callback_headers" placeholder='{"Authorization": "Bearer xxx"}' />
-          </div>
-          <div class="field" v-if="catForm.callback_method === 'POST'">
-            <div class="field-label">Body 模板（留空用默认模板）</div>
-            <textarea class="textarea mono" rows="5" v-model="catForm.callback_body"
-              placeholder='{"event":"transfer.completed","category":"{category}","status":"{status}","count":{transfer_count},"files":{transferred_files_json},"path":"{save_path}"}'></textarea>
-          </div>
-          <div v-if="catTestResult" class="card card-pad" style="padding: 10px 12px; font-size: 12.5px"
-            :style="catTestResult.ok ? 'background: var(--success-soft)' : 'background: var(--danger-soft)'">
-            <div style="font-weight: 600">{{ catTestResult.ok ? '✅ 测试成功' : '❌ 测试失败' }}
-              <span v-if="catTestResult.status_code" class="muted">HTTP {{ catTestResult.status_code }}</span></div>
-            <div class="mono" style="margin-top: 4px; overflow-wrap: anywhere; color: var(--text-2)">{{ catTestResult.response || catTestResult.error }}</div>
-          </div>
-        </template>
-        <template #footer>
-          <button v-if="catForm.id" class="btn" :disabled="testingCat" @click="testCat">
-            <span v-if="testingCat" class="spinner"></span>
-            <span v-else>发送测试</span>
-          </button>
-          <span v-if="!catForm.id" class="field-hint" style="margin-top: 0">保存后可发送测试</span>
-          <span class="flex-1"></span>
-          <button class="btn" @click="showCatEdit = false">取消</button>
-          <button class="btn btn-primary" :disabled="savingCat" @click="saveCat">保存</button>
-        </template>
-      </Modal>
-
-      <!-- 回调日志 -->
-      <Modal v-model="showCatLogs" size="lg" :title="`「${logsCat?.name || ''}」回调日志`">
-        <div v-if="catLogsLoading" class="loading-block"><span class="spinner"></span></div>
-        <div v-else-if="!catLogs.length" class="empty">
-          <div class="empty-title">还没有回调记录</div>
-          <div class="empty-hint">分类回调触发后会在这里记录每次调用的结果</div>
-        </div>
-        <div v-else style="display: flex; flex-direction: column; gap: 8px">
-          <div v-for="l in catLogs" :key="l.id" class="card card-pad" style="padding: 10px 12px">
-            <div class="flex" style="flex-wrap: wrap; gap: 6px">
-              <span class="badge" :class="l.ok ? 'badge-success' : 'badge-danger'"><span class="dot"></span>{{ l.ok ? '成功' : '失败' }}</span>
-              <span v-if="l.status_code" class="badge badge-gray">HTTP {{ l.status_code }}</span>
-              <span class="tag">{{ l.kind === 'round' ? '轮次' : l.kind === 'test' ? '测试' : '单任务' }}</span>
-              <span class="muted" style="font-size: 12px">{{ fmtTime(l.created_at) }}</span>
-            </div>
-            <div class="mono ellipsis" style="font-size: 11.5px; margin-top: 6px" :title="l.target">{{ l.target }}</div>
-            <pre v-if="l.response" class="log-tree" style="margin-top: 6px; max-height: 120px; padding: 8px 10px">{{ l.response }}</pre>
-          </div>
-        </div>
-        <template #footer>
-          <span class="flex-1"></span>
-          <button class="btn" @click="showCatLogs = false">关闭</button>
-        </template>
-      </Modal>
-
-      <!-- 分类回调使用说明 -->
-      <Modal v-model="showCatHelp" size="lg" title="任务分类与回调 · 使用说明">
-        <div style="font-size: 13.5px; line-height: 1.8; color: var(--text-2)">
-          <p style="margin: 0 0 10px"><b style="color: var(--text)">这是什么：</b>把任务归入分类，转存完成后自动按分类配置调用你的接口，让其他系统（媒体库刷新、字幕下载、文件整理脚本…）接着处理文件。</p>
-          <p style="margin: 0 0 10px"><b style="color: var(--text)">触发时机：</b></p>
-          <ul style="margin: 0 0 10px; padding-left: 20px">
-            <li><b>单任务完成</b>：该分类下每个任务转存完成就回调一次，参数里带这个任务的结果。</li>
-            <li><b>分类轮次完成</b>：一批定时触发（或一次手动运行）中，该分类全部已启动任务都结束后回调<b>一次</b>，参数汇总每个任务的结果。定时批量任务间有 1–3 分钟随机延迟，轮次会等齐再回调。</li>
-          </ul>
-          <p style="margin: 0 0 10px"><b style="color: var(--text)">可用变量（URL 和 Body 模板里用 <code class="mono">{变量名}</code> 引用）：</b></p>
-          <div class="table-wrap" style="margin-bottom: 10px">
-            <table class="table">
-              <thead><tr><th style="width: 190px">变量</th><th>说明</th></tr></thead>
-              <tbody>
-                <tr><td class="mono">{task_name}</td><td>任务名称（轮次模式下无单一任务概念，用 task_results_json）</td></tr>
-                <tr><td class="mono">{task_id}</td><td>任务 ID</td></tr>
-                <tr><td class="mono">{category}</td><td>分类名称</td></tr>
-                <tr><td class="mono">{status}</td><td>success / partial / failed（轮次模式为汇总状态）</td></tr>
-                <tr><td class="mono">{transfer_count}</td><td>本次新转存文件数</td></tr>
-                <tr><td class="mono">{transferred_files_json}</td><td>新文件名 JSON 数组，如 ["a.mkv","b.mkv"]</td></tr>
-                <tr><td class="mono">{transferred_files}</td><td>新文件名，换行分隔</td></tr>
-                <tr><td class="mono">{save_path}</td><td>保存路径</td></tr>
-                <tr><td class="mono">{trigger}</td><td>manual（手动）/ schedule（定时）</td></tr>
-                <tr><td class="mono">{finished_at}</td><td>完成时间</td></tr>
-                <tr><td class="mono">{message}</td><td>结果摘要（如「转存 3 个文件」）</td></tr>
-                <tr><td class="mono">{task_results_json}</td><td>仅轮次模式：每个任务结果的 JSON 数组</td></tr>
-                <tr><td class="mono">{round_id} / {task_count} / {total_transferred}</td><td>仅轮次模式：轮次 ID / 任务数 / 总转存数</td></tr>
-              </tbody>
-            </table>
-          </div>
-          <p style="margin: 0 0 10px"><b style="color: var(--text)">示例：</b></p>
-          <pre class="log-tree" style="margin-bottom: 10px">GET  http://192.168.1.10:8080/api/refresh?dir={save_path}&count={transfer_count}
-
-POST Body（默认模板，可自行修改）：
-{"event":"transfer.completed","category":"{category}","status":"{status}","count":{transfer_count},"files":{transferred_files_json},"path":"{save_path}"}</pre>
-          <p style="margin: 0"><b style="color: var(--text)">注意事项：</b>勾选「0 转存不回调」后，本次（轮次模式按整轮汇总）没有任何新文件且无失败时不调用接口，有失败仍会回调；HTTP 2xx 视为成功；超时默认 15 秒（可配）；调用失败不自动重试，结果记录在「回调日志」里；请求头（可能含密钥）明文存于本地数据库；服务重启会丢失进行中的轮次；下游接口建议使用内网地址。</p>
-        </div>
-        <template #footer>
-          <button class="btn" @click="showCatHelp = false">我知道了</button>
-        </template>
-      </Modal>
   </div>
 </template>
