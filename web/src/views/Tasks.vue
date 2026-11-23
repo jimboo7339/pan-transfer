@@ -87,8 +87,29 @@ function gotoDetailById(id) {
 }
 
 // ---------- 批量操作 ----------
-// 卡片的勾选框只负责"切换选中"，真正的状态存在 BatchBar 里。
-// 这里把点击转发给浮动条，避免两份状态再次分叉。
+// 卡片的勾选框已移除，改为**整卡点击选中**：
+//   - 点卡片空白处 → 切换选中（选中后整卡有主色描边，非常明确）；
+//   - 点任务名 / 状态徽标 / 底部按钮 → 各自的原有行为，不触发选中。
+//
+// 为什么这样改（用户反馈「checkbox 离任务名太远」）：
+//   根因是 .task-head 用了 justify-content: space-between，
+//   checkbox / 任务名 / 徽标被均分到两端，任务名被推到中间。
+//   修间距只是治标——checkbox 本身在这里价值也不高：
+//   批量操作是低频能力，却要在每张卡片上常驻一个控件并占掉顶部空间。
+//   整卡可点 + 选中描边，既省空间又让"选中"这件事更醒目。
+function onCardClick(t, e) {
+  // 点到交互元素时交给元素自己处理
+  if (e.target.closest('button, a, input, select, textarea, .no-select')) return
+  toggleSelect(t.id)
+}
+
+// 键盘可达：空格切换选中，回车进详情。
+function onCardKeydown(t, e) {
+  if (e.target !== e.currentTarget) return
+  if (e.key === ' ') { e.preventDefault(); toggleSelect(t.id); return }
+  if (e.key === 'Enter') { e.preventDefault(); gotoDetail(t) }
+}
+
 function toggleSelect(id) {
   if (batchRef.value) batchRef.value.toggle(id)
 }
@@ -386,14 +407,12 @@ const statusBadge = (t) => {
 
           <div v-if="viewMode === 'card' && runningTasks.length" class="grid-cards">
             <div v-for="t in runningTasks" :key="t.id"
-              class="card task-card" :class="{ 'task-card-selected': isSelected(t.id) }">
+              class="card task-card"
+              :class="{ 'task-card-selected': isSelected(t.id) }"
+              :tabindex="0" :aria-pressed="isSelected(t.id)"
+              @click="onCardClick(t, $event)" @keydown="onCardKeydown(t, $event)">
               <div class="task-head">
-                <!-- 勾选框默认隐藏，hover 或已选中时显现：
-                     批量操作是"偶尔用一下"的能力，不该常驻占据视觉 -->
-                <label class="task-check" :title="'选择该任务'" @click.stop>
-                  <input type="checkbox" :checked="isSelected(t.id)" @change="toggleSelect(t.id)" />
-                </label>
-                <div class="task-name" @click="gotoDetail(t)" :title="'查看任务详情'">{{ t.task_name }}</div>
+                <div class="task-name" :title="'查看任务详情'">{{ t.task_name }}</div>
                 <span class="badge" :class="statusBadge(t).cls"><span class="dot"></span>{{ statusBadge(t).text }}</span>
               </div>
               <div class="task-meta">
@@ -439,12 +458,12 @@ const statusBadge = (t) => {
           <div v-else-if="viewMode === 'table'" class="section-empty">暂无已暂停的任务</div>
           <div v-if="viewMode === 'card' && pausedTasks.length" class="grid-cards">
             <div v-for="t in pausedTasks" :key="t.id"
-              class="card task-card task-card-paused" :class="{ 'task-card-selected': isSelected(t.id) }">
+              class="card task-card task-card-paused"
+              :class="{ 'task-card-selected': isSelected(t.id) }"
+              :tabindex="0" :aria-pressed="isSelected(t.id)"
+              @click="onCardClick(t, $event)" @keydown="onCardKeydown(t, $event)">
               <div class="task-head">
-                <label class="task-check" :title="'选择该任务'" @click.stop>
-                  <input type="checkbox" :checked="isSelected(t.id)" @change="toggleSelect(t.id)" />
-                </label>
-                <div class="task-name" @click="gotoDetail(t)" :title="'查看任务详情'">{{ t.task_name }}</div>
+                <div class="task-name" :title="'查看任务详情'">{{ t.task_name }}</div>
                 <span class="badge" :class="statusBadge(t).cls"><span class="dot"></span>{{ statusBadge(t).text }}</span>
               </div>
               <div class="task-meta">
