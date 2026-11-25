@@ -10,7 +10,9 @@ const visible = ref(false)
 const loading = ref(false)
 const accountId = ref(0)
 const fid = ref('0')
-const trail = ref([]) // [{fid, name}]
+// 面包屑：每项是一个已进入的目录 {fid: 它自己的 fid, name}。
+// 当前目录 = 最后一项；空数组表示根目录（fid='0'）。
+const trail = ref([])
 const items = ref([])
 const creating = ref(false)
 const newName = ref('')
@@ -29,12 +31,9 @@ function open(accId, initialPath = '') {
     // 从路径解析起点目录
     fileApi.resolve(accId, initialPath).then(res => {
       fid.value = res.fid
-      // trail 必须包含"当前目录"这一项：pick() 是靠 trail 拼路径的，
-      // 少了当前目录 → 用户点"选择此目录"时路径变成根目录，已填的保存路径被清空。
-      trail.value = [
-        { fid: '0', name: '根目录' },
-        { fid: res.fid, name: res.name || initialPath.split('/').filter(Boolean).pop() || '当前目录' },
-      ]
+      // 整条 initialPath 合成一项（fid 为末级目录自身），pick() 按 trail
+      // 拼路径，必须保留每一层，否则从已有路径进入时第一层会被吞掉。
+      trail.value = pathTrail(res.fid, initialPath)
       load(fid.value)
     }).catch(() => { fid.value = '0'; load('0') })
   } else {
@@ -43,6 +42,14 @@ function open(accId, initialPath = '') {
   }
 }
 defineExpose({ open })
+
+// 把初始路径转成 trail：整条路径合成一项，fid 就是该目录自身的 fid。
+// 两个驱动的 ResolvePathToFID 都只返回末级 fid（夸克 path_list 按路径返回、
+// 光鸭逐级 ls 返回最后一级），中间层级没有可用 fid，无法拆成多项供面包屑跳转。
+function pathTrail(fidValue, path) {
+  const parts = path.split('/').map(s => s.trim()).filter(Boolean)
+  return parts.length ? [{ fid: fidValue, name: parts.join('/') }] : []
+}
 
 async function load(target) {
   loading.value = true
@@ -58,26 +65,25 @@ async function load(target) {
 }
 
 // pick 返回当前目录：trail 的最后一项就是当前目录（open/enter 都保证这点）。
-// 早先这里用 trail.map(name).join('/') 拼路径，而 trail 的语义是"祖先链"，
-// 从 initialPath 进入时 trail 只有 [根目录] → 拼出 '/' → 保存路径被清空。
+// 旧代码 trail.slice(1) 把第一层真实目录当成"根目录哨兵"切掉，导致
+// /影视资源/电视剧/xxx 变成 /电视剧/xxx。
 function pick() {
   const cur = trail.value[trail.value.length - 1]
-  const path = cur && cur.name && cur.name !== '根目录'
-    ? '/' + trail.value.slice(1).map(t => t.name).filter(Boolean).join('/')
-    : ''
-  emit('picked', { path: path === '/' ? '' : path, fid: fid.value })
+  const path = cur && cur.name ? '/' + trail.value.map(t => t.name).join('/') : ''
+  emit('picked', { path, fid: fid.value })
   visible.value = false
 }
 
 function enter(item) {
-  trail.value.push({ fid: fid.value, name: item.name })
+  trail.value.push({ fid: item.id, name: item.name })
   load(item.id)
 }
 
 function jump(idx) {
+  // idx<0 = 回根目录；否则跳到 trail[idx] 这个目录本身（fid 就是它自己的）。
   if (idx < 0) { trail.value = []; load('0'); return }
   const t = trail.value[idx]
-  trail.value = trail.value.slice(0, idx)
+  trail.value = trail.value.slice(0, idx + 1)
   load(t.fid)
 }
 
@@ -120,7 +126,7 @@ async function mkdir() {
       <button class="btn" :disabled="creating || !newName.trim()" @click="mkdir">新建</button>
     </div>
     <template #footer>
-      <span class="flex-1 mono muted">当前：/{{ trail.map(t => t.name).filter(n => n && n !== '根目录').join('/') }}</span>
+      <span class="flex-1 mono muted">当前：/{{ trail.map(t => t.name).join('/') }}</span>
       <button class="btn" @click="visible = false">取消</button>
       <button class="btn btn-primary" @click="pick">选择此目录</button>
     </template>
