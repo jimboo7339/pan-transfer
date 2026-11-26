@@ -23,6 +23,13 @@ import { ref, watch } from 'vue'
 
 const PREFIX = 'pt_draft_'
 
+// safeGet 读取 localStorage，禁用/隐私模式下返回 null。
+// persist/clear 已各自 try-catch，读取也必须一致——否则 Safari 隐私模式下
+// draft.start() 在 TaskEdit.open() 里抛错，弹层打开但表单未填充。
+function safeGet(key) {
+  try { return localStorage.getItem(key) } catch { return null }
+}
+
 // safeParse 解析 JSON，失败返回 fallback。
 function safeParse(raw, fallback) {
   if (!raw) return fallback
@@ -87,7 +94,7 @@ export function useDraft(key, target) {
   // start 开始监听 target 变化。幂等：重复调用不会叠加监听。
   const start = () => {
     if (stopWatch) return
-    hasDraft.value = !!safeParse(localStorage.getItem(storageKey), null)
+    hasDraft.value = !!safeParse(safeGet(storageKey), null)
     stopWatch = watch(
       () => read(),
       () => {
@@ -111,7 +118,7 @@ export function useDraft(key, target) {
   // restore 把草稿合并回 target。
   // 用合并而不是替换：target 可能有默认值/新字段，直接覆盖会丢掉。
   const restore = () => {
-    const raw = safeParse(localStorage.getItem(storageKey), null)
+    const raw = safeParse(safeGet(storageKey), null)
     if (!raw || typeof raw !== 'object') return false
     const t = unrefTarget(target)
     for (const [k, v] of Object.entries(raw)) {

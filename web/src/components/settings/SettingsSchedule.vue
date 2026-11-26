@@ -30,6 +30,9 @@ let cronTimer = null
 let cronSeq = 0
 
 watch(() => props.settings.schedule_cron, (v) => {
+  // 入口统一递增序号：旧代码只在表达式有效时 ++，清空输入或降到 4 字段时
+  // 直接 return，已发出的请求返回后 seq 仍相等，会把旧时间写回空输入框旁。
+  const seq = ++cronSeq
   cronNext.value = ''; cronError.value = ''
   if (cronTimer) { clearTimeout(cronTimer); cronTimer = null }
   if (!v || !v.trim()) return
@@ -39,21 +42,21 @@ watch(() => props.settings.schedule_cron, (v) => {
     return
   }
 
-  const seq = ++cronSeq
   cronTimer = setTimeout(() => {
     cronApi.next(expr)
-      .then(r => { if (seq === cronSeq) cronNext.value = r.next_run })
-      .catch(e => { if (seq === cronSeq) cronError.value = e.message })
+      .then(r => { if (seq === cronSeq && expr === (props.settings.schedule_cron || '').trim()) cronNext.value = r.next_run })
+      .catch(e => { if (seq === cronSeq && expr === (props.settings.schedule_cron || '').trim()) cronError.value = e.message })
   }, 300)
 })
 
-// toggleEnabled 切换全局调度开关。
+// toggleEnabled 只改本地状态，落库统一走底部「保存调度配置」按钮。
 //
-// 用 :checked + @change 而不是 v-model：父组件传进来的是 reactive 对象，
-// 子组件直接改它的字段虽然能工作，但会让"谁改了状态"变得不可追踪。
-// 这里统一 emit('save', patch)，由容器落库后再回填。
+// 早先这里 emit('save') 立即落库，而下面的 cron 要按按钮才保存：
+// 用户改了 cron 没保存、拨一下开关触发 persist()，容器回填数据库里的旧值，
+// 未保存的 cron 被静默覆盖。整张卡片必须只有一个保存入口。
+// props.settings 是 reactive 对象，这里改字段是可追踪的（v-model 也在改它）。
 function toggleEnabled(e) {
-  emit('save', { schedule_enabled: e.target.checked ? 'on' : 'off' })
+  props.settings.schedule_enabled = e.target.checked ? 'on' : 'off'
 }
 
 function saveSchedule() {

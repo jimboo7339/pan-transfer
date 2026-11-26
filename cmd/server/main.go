@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -41,12 +42,13 @@ var version = "dev"
 // stPtr 是 *runtime 上的稳定字段（不是临时变量），把它取地址交给 httpapi.Deps，
 // 于是 API 层每次请求读到的都是还原后的最新句柄，不需要重启进程。
 type runtime struct {
-	mu     sync.Mutex
-	st     *store.Store
-	stSlot **store.Store // 指向 st 字段自身，供 Deps.Store 持有
-	mgr    *accounts.Manager
-	svc    *transfer.Service
-	data   string
+	mu        sync.Mutex
+	st        *store.Store
+	stSlot    **store.Store // 指向 st 字段自身，供 Deps.Store 持有
+	mgr       *accounts.Manager
+	svc       *transfer.Service
+	data      string
+	restoring atomic.Bool // 还原换库窗口，API 层据此拒绝请求（避免拿到已关闭的库）
 }
 
 // stPtr 返回指向 st 字段的指针。
@@ -86,6 +88,12 @@ func (rt *runtime) attachService(svc *transfer.Service) {
 func (rt *runtime) restoreFrom(backupPath string) error {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+
+	// 换库窗口内旧句柄会被 Close，所有 API handler 此时若执行会拿到坏句柄
+	// （500），鉴权读库失败还会 fail-open。提前置标志让 wrap 统一返回 503；
+	// defer 保证成功/失败路径都恢复服务。
+	rt.restoring.Store(true)
+	defer rt.restoring.Store(false)
 
 	dbPath := rt.dbPath()
 
@@ -234,6 +242,7 @@ func main() {
 		DataDir:           *dataDir,
 		DBPath:            dbPath,
 		Restore:           rt.restoreFrom,
+		Restoring:         &rt.restoring,
 	})
 
 	svc := transfer.New(transfer.Options{

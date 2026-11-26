@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"pan-transfer/internal/accounts"
@@ -57,6 +58,14 @@ type Deps struct {
 	// Restore 从备份还原数据库，由 main 装配（需要管理 Store/Manager/调度器
 	// 三者的生命周期）。为 nil 时还原接口返回「当前构建未提供还原能力」。
 	Restore func(backupPath string) error
+
+	// Restoring 是还原进行中的标志（由 main 装配，指向 runtime 的原子布尔）。
+	//
+	// 为什么需要：还原会先 Close 旧库、换文件、再重开，这中间所有 API handler
+	// 若照常执行，会拿到已关闭的句柄导致 500，甚至 authEnabled 因读库失败
+	// 而 fail-open（放行未鉴权请求）。wrap 在入口看到此标志直接返回 503，
+	// 让整个换库窗口对 API 不可见。为 nil 时不做门控（测试/无还原能力的构建）。
+	Restoring *atomic.Bool
 }
 
 // currentStore 返回当前数据库句柄；Store 未注入时返回 nil。
@@ -284,8 +293,14 @@ func (s *Server) handleHealthReady(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. 账号是否可用（有账号全部失效时给出可操作的结论）。
-	if s.deps.Accounts != nil {
-		if list, err := s.currentStore().ListAccounts(ctx); err == nil {
+	// currentStore() 可能返回 nil（还原失败或 Store 未注入），裸解引用会 panic；
+	// 这个端点不套 wrap，panic 会直接打挂请求。
+	if st := s.currentStore(); st == nil {
+		checks["accounts"] = "error"
+		details["accounts"] = "存储未初始化"
+		ok = false
+	} else if s.deps.Accounts != nil {
+		if list, err := st.ListAccounts(ctx); err == nil {
 			total, active := len(list), 0
 			for _, a := range list {
 				if a.IsActive {
@@ -336,18 +351,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func writeErr(w http.ResponseWriter, err error) {
 	var ae *domain.AppError
 	if errors.As(err, &ae) {
-		status := http.StatusInternalServerError
-		switch ae.Code {
-		case domain.CodeValidation:
-			status = http.StatusBadRequest
-		case domain.CodeNotFound:
-			status = http.StatusNotFound
-		case domain.CodeAuthExpired, domain.CodePermissionDenied:
-			status = http.StatusUnauthorized
-		case domain.CodeRateLimited:
-			status = http.StatusTooManyRequests
-		}
-		writeJSON(w, status, map[string]apiError{"error": {Code: ae.Code, Message: ae.Message}})
+		// 状态码统一取 AppError.HTTPStatus()（与 codeTable 单一事实源一致）。
+		// 早先这里另写一份 switch：CodePermissionDenied 被映射成 401（应 403），
+		// CodeDriverError/NotImplement/AdminAuthRequired 落入默认 500（应 502/501/401），
+		// 两套映射分叉导致前端按状态码做的处理全部失真。
+		writeJSON(w, ae.HTTPStatus(), map[string]apiError{"error": {Code: ae.Code, Message: ae.Message}})
 		return
 	}
 	// 非领域错误：细节只进日志，不进响应。
@@ -364,6 +372,15 @@ func writeErr(w http.ResponseWriter, err error) {
 // wrap 统一鉴权 + 错误处理 + 错误计数。handler 返回错误时写 JSON 错误响应。
 func (s *Server) wrap(fn func(w http.ResponseWriter, r *http.Request) error) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 还原换库窗口：旧库已 Close、新库还没接上，此时任何业务 handler
+		// 拿到句柄都会报错（500），鉴权读库失败还会 fail-open 放行请求。
+		// 在入口统一拦成 503，让前端可以提示"正在还原，请稍后刷新"。
+		if flag := s.deps.Restoring; flag != nil && flag.Load() {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]apiError{"error": {
+				Code: domain.CodeInternal, Message: "数据库正在还原，请稍后重试",
+			}})
+			return
+		}
 		if err := s.checkAuth(r); err != nil {
 			s.countAPIError(err)
 			writeErr(w, err)
@@ -534,7 +551,17 @@ func (s *Server) secretKey() string {
 }
 
 func (s *Server) authEnabled(ctx context.Context) bool {
-	v, _ := s.currentStore().GetSetting(ctx, "auth_password")
+	st := s.currentStore()
+	if st == nil {
+		// fail-closed：读不到库时按"需要鉴权"处理。早先吞掉错误返回 false，
+		// 还原窗口/库故障期间任何人都会被视为已授权，直接放行所有写操作。
+		return true
+	}
+	v, err := st.GetSetting(ctx, "auth_password")
+	if err != nil {
+		slog.Warn("读取鉴权配置失败，按需要鉴权处理", "err", err)
+		return true
+	}
 	return strings.TrimSpace(v) != ""
 }
 

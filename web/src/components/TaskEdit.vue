@@ -115,6 +115,9 @@ let cronTimer = null
 let cronSeq = 0
 
 watch(() => form.run_cron, (v) => {
+  // 入口统一递增：清空/降到 4 字段直接 return 时也要作废旧请求，
+  // 否则已发出的校验返回后 seq 仍相等，把旧时间写回空表达式旁。
+  const seq = ++cronSeq
   cronNext.value = ''; cronError.value = ''
   if (cronTimer) { clearTimeout(cronTimer); cronTimer = null }
   if (!v || !v.trim()) return
@@ -124,11 +127,10 @@ watch(() => form.run_cron, (v) => {
   const parts = expr.split(/\s+/)
   if (parts.length !== 5) { cronError.value = '需要 5 个字段：分 时 日 月 周'; return }
 
-  const seq = ++cronSeq
   cronTimer = setTimeout(() => {
     cronApi.next(expr)
-      .then(r => { if (seq === cronSeq) cronNext.value = r.next_run })
-      .catch(e => { if (seq === cronSeq) cronError.value = e.message })
+      .then(r => { if (seq === cronSeq && expr === (form.run_cron || '').trim()) cronNext.value = r.next_run })
+      .catch(e => { if (seq === cronSeq && expr === (form.run_cron || '').trim()) cronError.value = e.message })
   }, 300)
 }, { immediate: false })
 

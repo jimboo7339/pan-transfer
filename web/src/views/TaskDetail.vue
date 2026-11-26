@@ -76,8 +76,14 @@ const statusBadge = computed(() => {
   return { cls: 'badge-info', text: '待运行' }
 })
 
+let loadAllSeq = 0
+
 async function loadAll() {
   if (!taskId.value) return
+  // 序号守卫：路由参数快速切换（/tasks/1 → /tasks/2）时，
+  // 旧 taskApi.list() 后返回会把 A 任务写进 B 的详情页。
+  const seq = ++loadAllSeq
+  const id = taskId.value
   loading.value = true
   try {
     const [tasks, accs, cats] = await Promise.all([
@@ -85,18 +91,19 @@ async function loadAll() {
       accountApi.list().catch(() => []),
       categoryApi.list().catch(() => []),
     ])
+    if (seq !== loadAllSeq || id !== taskId.value) return
     accounts.value = accs || []
     categories.value = cats || []
-    task.value = (tasks || []).find(t => t.id === taskId.value) || null
+    task.value = (tasks || []).find(t => t.id === id) || null
     if (!task.value) {
       toast('任务不存在或已被删除', 'error', 5000)
       return
     }
     await loadRuns()
   } catch (e) {
-    toast(e.message, 'error')
+    if (seq === loadAllSeq) toast(e.message, 'error')
   } finally {
-    loading.value = false
+    if (seq === loadAllSeq) loading.value = false
   }
 }
 

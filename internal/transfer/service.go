@@ -141,7 +141,13 @@ type Service struct {
 	schedStartMu sync.Mutex
 	schedStarted bool
 
-	// appMu 保护 appCtx / cancel 的替换（RestartScheduling 写，sweep 读）。
+	// 调度循环的 ctx/cancel（独立于 appCtx）：还原时先停循环、等在途任务、换库、再重启。
+	// schedStartMu 保护这三个字段的替换（StopScheduling 写，Start 读）。
+	schedCtx    context.Context
+	schedCancel context.CancelFunc
+	schedDone   chan struct{}
+
+	// appMu 保护 appCtx / cancel 的替换（RestartScheduling 写，sweep/prune/StartTask 读）。
 	appMu sync.RWMutex
 }
 
@@ -155,6 +161,11 @@ func New(opts Options) *Service {
 		log = slog.Default()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	// 调度循环用独立的 ctx，而不是 appCtx：还原流程要「停调度但等在途任务跑完」，
+	// 旧实现 RestartScheduling 直接替换 appCtx，旧 cancel 被覆盖没调用，
+	// ticker goroutine 只监听 appContext().Done() 于是永远不退出 → 每还原一次多一个循环。
+	// 独立 schedCtx 让 StopScheduling 能干净地停掉循环，同时不影响继承 appCtx 的在途任务。
+	schedCtx, schedCancel := context.WithCancel(context.Background())
 	return &Service{
 		exec:        opts.Exec,
 		st:          opts.Store,
@@ -167,6 +178,9 @@ func New(opts Options) *Service {
 		rounds:      map[int64]*callbackRound{},
 		appCtx:      ctx,
 		cancel:      cancel,
+		schedCtx:    schedCtx,
+		schedCancel: schedCancel,
+		schedDone:   make(chan struct{}),
 		jobs:        newJobRegistry(50),
 		metrics:     opts.Metrics,
 	}
@@ -228,21 +242,21 @@ func (s *Service) lastPruneDone(today string) bool {
 	return done
 }
 
-// Close 停止调度循环并取消所有在途运行（进程退出、还原备份前调用）。
+// Close 停止调度循环并取消所有在途运行（进程退出时调用）。
 //
-// 注意这是**不可逆**的：appCtx 被 cancel 后，Start() 里的调度 goroutine
-// 会 return 退出。因此还原流程不能只调 Close 就完事，
-// 必须再调 RestartScheduling() 把调度重新拉起来，
-// 否则「还原一次之后定时任务再也不触发」。
-func (s *Service) Close() { s.cancel() }
+// 调度循环用独立的 schedCtx，所以这里要同时取消两个 ctx。
+func (s *Service) Close() {
+	s.cancel()
+	s.schedCancel()
+}
 
 // RestartScheduling 重新建立 appCtx 并重启调度循环。
 //
-// 为什么需要：Close() 会 cancel 掉 appCtx，而还原备份的流程是
-// 「Close → 换库 → Reload」。Reload 只换 store 引用，不重建 appCtx，
-// 于是 Start() 里的 goroutine 早已 return，调度永久停止；
-// 同时 StartTask 派生的 jobCtx 继承已取消的 appCtx，
-// 所有后续手动运行也会立刻失败。
+// 为什么需要：还原备份的流程是「StopScheduling → 换库 → Reload → RestartScheduling」。
+// 旧实现的 ticker goroutine 监听 appCtx，而 setAppContext 直接覆盖旧 cancel
+// （没调用）→ 旧循环永不退出，每还原一次多一个 ticker。
+// 现在调度循环用独立 schedCtx：StopScheduling 取消它并等旧循环退出，
+// RestartScheduling 只需重建 appCtx（供 StartTask 派生）并 Start 新循环。
 //
 // 幂等：schedStarted 由 Start() 自己维护，重复调用只会重启一次。
 func (s *Service) RestartScheduling() {
@@ -253,7 +267,7 @@ func (s *Service) RestartScheduling() {
 	s.Start()
 }
 
-// StopScheduling 标记调度为"未启动"，让下一次 Start 能重新拉起。
+// StopScheduling 停止调度循环并等待它退出，让下一次 Start 能干净地拉起新循环。
 //
 // 与 Close 的区别：Close 用于进程退出（要连带取消在途运行），
 // 而还原备份时需要先等在途任务跑完（它们持有旧库句柄，
@@ -261,8 +275,23 @@ func (s *Service) RestartScheduling() {
 // 所以还原流程只做"停止接新活 → 等在途 → 换库 → 重启调度"。
 func (s *Service) StopScheduling() {
 	s.schedStartMu.Lock()
+	if !s.schedStarted {
+		s.schedStartMu.Unlock()
+		return
+	}
 	s.schedStarted = false
+	done := s.schedDone
 	s.schedStartMu.Unlock()
+
+	// 取消独立 schedCtx 并等旧循环真正退出，避免还原期间仍触发 sweep
+	// （会读到已被 Close 的旧 store），也避免 Restart 后并存两个 ticker。
+	s.schedCancel()
+	if done != nil {
+		<-done
+	}
+	// 重建 schedCtx/done，供下一次 Start 使用（替换在锁外，Start 有 schedStarted 守卫）。
+	s.schedCtx, s.schedCancel = context.WithCancel(context.Background())
+	s.schedDone = make(chan struct{})
 }
 
 // WaitRunning 等待所有在途任务结束，最多等 timeout。
@@ -418,16 +447,18 @@ func (s *Service) Start() {
 		return
 	}
 	s.schedStarted = true
+	schedCtx, schedDone := s.schedCtx, s.schedDone
 	s.schedStartMu.Unlock()
 
 	// 启动时先清一次过期运行记录，之后每天一次
 	go s.pruneRunsDaily()
 	go func() {
+		defer close(schedDone)
 		ticker := time.NewTicker(sweepInterval)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-s.appContext().Done():
+			case <-schedCtx.Done():
 				return
 			case <-ticker.C:
 				s.sweep()
@@ -484,8 +515,11 @@ func (s *Service) pruneRunsDaily() {
 	s.lastPrune = today
 	s.stMu.Unlock()
 
+	// appCtx 会被 RestartScheduling 在 appMu 写锁下替换，这里必须取快照，
+	// 裸读 s.appCtx 与替换并发就是数据竞争（-race 能抓到）。
+	ctx := s.appContext()
 	days := 90
-	if v, err := st.GetSetting(s.appCtx, "run_retention_days"); err == nil {
+	if v, err := st.GetSetting(ctx, "run_retention_days"); err == nil {
 		if n, e := strconv.Atoi(strings.TrimSpace(v)); e == nil && n >= 0 {
 			days = n
 		}
@@ -493,7 +527,7 @@ func (s *Service) pruneRunsDaily() {
 	if days == 0 {
 		return
 	}
-	n, err := st.PruneRuns(s.appCtx, days, 50)
+	n, err := st.PruneRuns(ctx, days, 50)
 	if err != nil {
 		s.log.Warn("清理运行记录失败", "err", err)
 	} else if n > 0 {
@@ -503,7 +537,7 @@ func (s *Service) pruneRunsDaily() {
 
 // sweep 扫描到期任务并触发（cron 匹配，支持 */N 步长、周几组合等标准 5 字段表达式）。
 func (s *Service) sweep() {
-	ctx := s.appCtx
+	ctx := s.appContext()
 	st := s.store()
 	if st == nil {
 		// 还原过程中（或重开失败）store 可能短暂为 nil，
@@ -691,7 +725,7 @@ func (s *Service) StartTask(ctx context.Context, taskID int64) (*JobView, error)
 	// 用 appCtx 而不是请求 ctx：请求在提交后可能立刻返回，而转存必须继续。
 	// 超时仍由 RunTask 内部的 runTimeout 控制。
 	// 挂上进度接收者：执行器各阶段会通过它更新 Stage/Progress。
-	jobCtx, cancel := context.WithCancel(s.appCtx)
+	jobCtx, cancel := context.WithCancel(s.appContext())
 	js.setCancel(cancel)
 	jobCtx = WithProgressSink(jobCtx, js)
 

@@ -13,12 +13,14 @@ const qrTitle = ref('扫码登录')
 const status = ref('') // waiting/success/failed/expired
 const polling = ref(false)
 let pollTimer = null
+let closeTimer = null // 扫码成功后延时关闭的定时器（手动关闭/重开时必须清掉）
 let qrToken = ''
 let lastType = ''
 
 const emit = defineEmits(['success'])
 
 function open(driverType) {
+  stopPoll() // 关掉上一次（可能还在轮询或等待延时关闭）的定时器
   visible.value = true
   lastType = driverType
   start(driverType)
@@ -69,7 +71,10 @@ function schedulePoll(driverType) {
         status.value = 'success'
         qrHint.value = '登录成功！'
         emit('success', cfg)
-        setTimeout(() => { visible.value = false }, 800)
+        // 赋给 closeTimer 而非裸 setTimeout：否则扫码成功后 800ms 内
+        // 用户手动关闭并重开弹层，旧定时器会把新弹层也关掉。
+        if (closeTimer) clearTimeout(closeTimer)
+        closeTimer = setTimeout(() => { visible.value = false; closeTimer = null }, 800)
         return
       }
       status.value = res.status
@@ -85,6 +90,7 @@ function schedulePoll(driverType) {
 
 function stopPoll() {
   if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
+  if (closeTimer) { clearTimeout(closeTimer); closeTimer = null }
 }
 
 function close() {

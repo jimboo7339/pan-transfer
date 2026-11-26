@@ -135,8 +135,18 @@ func (s *Server) originAllowed(r *http.Request) bool {
 		return true
 	}
 	host := r.Host
-	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
-		host = strings.TrimSpace(strings.Split(h, ",")[0])
+	// 与 clientKey 一致：X-Forwarded-Host 也是客户端可伪造的头，
+	// 只有显式配置可信代理（PAN_TRANSFER_TRUST_PROXY=1）时才采信，
+	// 且取最右侧（离本服务最近的一跳，由自己的反代写入）。
+	// 早先无条件采信：直接暴露公网时攻击者伪造该头即可让任意 Origin
+	// 被判为同源，绕过 CSRF 防护。
+	if s.trustProxy() {
+		if h := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); h != "" {
+			parts := strings.Split(h, ",")
+			if v := strings.TrimSpace(parts[len(parts)-1]); v != "" {
+				host = v
+			}
+		}
 	}
 	if origin == "http://"+host || origin == "https://"+host {
 		return true

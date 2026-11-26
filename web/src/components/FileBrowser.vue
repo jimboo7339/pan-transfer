@@ -19,10 +19,15 @@ const newName = ref('')
 
 const emit = defineEmits(['picked'])
 
+// 竞态守卫：弹层内连点文件夹 / 换账号重开时，旧请求后返回不能覆盖新状态。
+// 旧代码 load() 把 fid.value 写回自己的 target，随后 pick() 会用新路径配旧 fid。
+let loadSeq = 0
+
 function open(accId, initialPath = '') {
   accountId.value = accId
   visible.value = true
   trail.value = []
+  const seq = ++loadSeq
   // 先重置再解析：否则弹层打开的一瞬间会显示上一次浏览的目录内容
   // （fid 还是旧值），底部"当前：/…"与列表都是脏的。
   fid.value = '0'
@@ -30,15 +35,16 @@ function open(accId, initialPath = '') {
   if (initialPath) {
     // 从路径解析起点目录
     fileApi.resolve(accId, initialPath).then(res => {
+      if (seq !== loadSeq || accountId.value !== accId) return
       fid.value = res.fid
       // 整条 initialPath 合成一项（fid 为末级目录自身），pick() 按 trail
       // 拼路径，必须保留每一层，否则从已有路径进入时第一层会被吞掉。
       trail.value = pathTrail(res.fid, initialPath)
-      load(fid.value)
-    }).catch(() => { fid.value = '0'; load('0') })
+      load(fid.value, seq)
+    }).catch(() => { if (seq === loadSeq) { fid.value = '0'; load('0', seq) } })
   } else {
     fid.value = '0'
-    load('0')
+    load('0', seq)
   }
 }
 defineExpose({ open })
@@ -51,16 +57,18 @@ function pathTrail(fidValue, path) {
   return parts.length ? [{ fid: fidValue, name: parts.join('/') }] : []
 }
 
-async function load(target) {
+async function load(target, seq = loadSeq) {
   loading.value = true
+  const acc = accountId.value
   try {
-    items.value = (await fileApi.list(accountId.value, target)) || []
-    items.value = items.value.filter(i => i.is_dir)
+    const list = (await fileApi.list(acc, target)) || []
+    if (seq !== loadSeq || acc !== accountId.value) return
+    items.value = list.filter(i => i.is_dir)
     fid.value = target
   } catch (e) {
-    toast(e.message, 'error')
+    if (seq === loadSeq) toast(e.message, 'error')
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 

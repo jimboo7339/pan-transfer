@@ -40,10 +40,19 @@ const activeJobTaskId = ref(0)
 // 必须校验 localStorage 里的值：模板是 v-if="viewMode === 'table'" /
 // v-if="viewMode === 'card'"，若存了历史遗留值（'list'/'grid'）或被篡改，
 // 两个分支都不成立 → 运行中/已暂停两个区块全空，用户看到一片空白。
-const viewMode = ref(localStorage.getItem('pt_task_view') === 'table' ? 'table' : 'card')
+// Safari 隐私模式 / 沙箱 iframe 下访问 localStorage 会抛 SecurityError，
+// 而这在 setup 同步阶段发生 → 整页白屏。项目里 theme.js/api.js 已做同样保护。
+function safeGet(key) {
+  try { return localStorage.getItem(key) } catch { return null }
+}
+function safeSet(key, value) {
+  try { localStorage.setItem(key, value) } catch { /* 存储不可用时仅影响偏好记忆 */ }
+}
+
+const viewMode = ref(safeGet('pt_task_view') === 'table' ? 'table' : 'card')
 function setViewMode(m) {
   viewMode.value = m
-  localStorage.setItem('pt_task_view', m)
+  safeSet('pt_task_view', m)
 }
 
 // 表格视图需要账号/网盘类型信息，卡片视图是从 accounts 里查的，

@@ -9,8 +9,10 @@
 //      而不是让用户以为卡住了；
 //   5. 完成后展示结果摘要（成功/失败条数），失败项可展开看原因——
 //      批量操作最容易出现的就是"删了 8 个，漏了 2 个不知道为什么"。
-import { ref, computed } from 'vue'
+import { ref, computed, inject } from 'vue'
 import { taskApi } from '../api'
+
+const toast = inject('toast')
 
 const props = defineProps({
   // 当前筛选后可见的任务列表（用于「全选」的语义：只选可见项）
@@ -102,8 +104,11 @@ async function run(action, extra = {}) {
     selected.value = failedIds
     emitChange()
   } catch (e) {
-    // 错误由父组件 toast（这里只负责清空进度）
-    throw e
+    // 旧代码在这里 `throw e`，注释声称"错误由父组件 toast"，
+    // 但 defineEmits 没有 error 事件、父组件也没监听 →
+    // async 事件处理函数产生 unhandled promise rejection，用户完全看不到失败。
+    // 直接在本组件提示（toast 是全局注入的）。
+    toast(`批量操作失败：${e.message}`, 'error', 6000)
   } finally {
     busy.value = false
     progress.value = ''

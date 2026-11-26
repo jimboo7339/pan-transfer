@@ -27,19 +27,31 @@ function open(t) {
 }
 defineExpose({ open })
 
+// 竞态守卫：open() 切任务、switchTab() 切页签都会并发触发 reload。
+// 旧响应后返回会把新任务的列表覆盖成旧任务的内容。
+let reloadSeq = 0
+
 async function reload() {
   if (!task.value) return
+  const seq = ++reloadSeq
+  const id = task.value.id
+  const currentTab = tab.value
   loading.value = true
   try {
-    if (tab.value === 'runs') runs.value = (await taskApi.runs(task.value.id)) || []
-    else {
-      saved.value = (await taskApi.savedNames(task.value.id)) || []
-      savedTotal.value = (await taskApi.savedCount(task.value.id))?.count ?? saved.value.length
+    if (currentTab === 'runs') {
+      const list = (await taskApi.runs(id)) || []
+      if (seq === reloadSeq && id === task.value?.id && currentTab === tab.value) runs.value = list
+    } else {
+      const list = (await taskApi.savedNames(id)) || []
+      const count = (await taskApi.savedCount(id))?.count ?? list.length
+      if (seq !== reloadSeq || id !== task.value?.id || currentTab !== tab.value) return
+      saved.value = list
+      savedTotal.value = count
     }
   } catch (e) {
-    toast(e.message, 'error')
+    if (seq === reloadSeq) toast(e.message, 'error')
   } finally {
-    loading.value = false
+    if (seq === reloadSeq) loading.value = false
   }
 }
 

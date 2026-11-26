@@ -22,6 +22,7 @@ const loading = ref(false)
 const error = ref('')
 const activeIndex = ref(0)
 let debounceTimer = null
+let searchSeq = 0 // 请求序号守卫：旧请求后返回不能覆盖新结果
 
 const emit = defineEmits(['close'])
 
@@ -35,6 +36,7 @@ const flatHits = computed(() => {
 const canSearch = computed(() => q.value.trim().length > 0)
 
 function open() {
+  searchSeq++ // 作废上次打开时的在途请求
   visible.value = true
   q.value = ''
   results.value = null
@@ -55,20 +57,27 @@ function focusInput() {
 
 async function runSearch() {
   const term = q.value.trim()
+  const seq = ++searchSeq
   if (!term) {
     results.value = null
+    loading.value = false
     return
   }
   loading.value = true
   error.value = ''
   try {
-    results.value = await searchApi.query(term)
+    const res = await searchApi.query(term)
+    if (seq !== searchSeq || term !== q.value.trim()) return
+    results.value = res
     activeIndex.value = 0
   } catch (e) {
+    if (seq !== searchSeq || term !== q.value.trim()) return
     error.value = e.message
     results.value = null
   } finally {
-    loading.value = false
+    // 只有最新请求能清 loading；旧请求提前清会让界面显示"搜完了"
+    // 而新请求还在飞。
+    if (seq === searchSeq) loading.value = false
   }
 }
 
@@ -76,6 +85,7 @@ async function runSearch() {
 watch(q, (v) => {
   if (debounceTimer) clearTimeout(debounceTimer)
   if (!v.trim()) {
+    searchSeq++ // 清空输入：作废所有在途请求
     results.value = null
     loading.value = false
     return
