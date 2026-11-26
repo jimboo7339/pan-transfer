@@ -79,6 +79,7 @@ type bundleTask struct {
 	Pattern    string   `json:"pattern"`
 	Replace    string   `json:"replace"`
 	IgnoreExt  bool     `json:"ignore_extension"`
+	DedupSt    string   `json:"dedup_strategy,omitempty"` // largest（默认）/ quality（优先清晰度）
 	RunMode    string   `json:"run_mode"`
 	RunCron    string   `json:"run_cron"`
 	RunWeek    string   `json:"run_week"`
@@ -187,6 +188,7 @@ func (s *Server) handleConfigExport(w http.ResponseWriter, r *http.Request) erro
 				Pattern:        t.Pattern,
 				Replace:        t.Replace,
 				IgnoreExt:      t.IgnoreExtension,
+				DedupSt:        t.DedupStrategy,
 				RunMode:        transfer.EffectiveRunMode(t),
 				RunCron:        t.RunCron,
 				RunWeek:        t.RunWeek,
@@ -507,6 +509,7 @@ func (s *Server) applyImport(ctx context.Context, b *configBundle) applyResult {
 			Pattern:                bt.Pattern,
 			Replace:                bt.Replace,
 			IgnoreExtension:        bt.IgnoreExt,
+			DedupStrategy:          bt.DedupSt,
 			RunMode:                firstNonEmpty(bt.RunMode, "manual"),
 			RunCron:                strings.TrimSpace(bt.RunCron),
 			RunWeek:                bt.RunWeek,

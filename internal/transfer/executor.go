@@ -427,7 +427,7 @@ func (e *DramaExecutor) planTransfer(shareFiles []driver.ShareEntry, destFileNam
 		return nil
 	}
 
-	// 按目标名去重：同 key 保留 size 最大 / updatedAt 最新（来自Trae）
+	// 按目标名去重：同 key 保留最优候选（来自Trae；策略可为保留最大 / 优先清晰度）
 	best := map[string]int{}
 	for idx, c := range candidates {
 		key := c.targetName
@@ -440,8 +440,11 @@ func (e *DramaExecutor) planTransfer(shareFiles []driver.ShareEntry, destFileNam
 			continue
 		}
 		prev := candidates[prevIdx]
-		if c.item.Size > prev.item.Size ||
-			(c.item.Size == prev.item.Size && c.item.UpdatedAt > prev.item.UpdatedAt) {
+		if betterDedupCandidate(
+			DedupCandidate{Name: c.item.FileName, Size: c.item.Size, UpdatedAt: c.item.UpdatedAt},
+			DedupCandidate{Name: prev.item.FileName, Size: prev.item.Size, UpdatedAt: prev.item.UpdatedAt},
+			e.task.DedupStrategy,
+		) {
 			best[key] = idx
 		}
 	}
@@ -555,6 +558,7 @@ func (e *DramaExecutor) saveFiles(ctx context.Context, pwdID, stoken, destFID st
 // 这不是契约保证：
 //   - 光鸭是同步 restore 接口，靠 diff 目标目录对齐，顺序与请求无关；
 //   - 夸克是异步 task，save_as_top_fids 的返回顺序取决于服务端。
+//
 // 只要上游做了去重、过滤或重排，plan[i] 就会指向**另一个文件**，
 // RenameFile 会把 A 文件改成 B 的名字 —— 静默的数据错乱，
 // 而且日志里显示的还是正确的 origin->target，排障时完全看不出来。

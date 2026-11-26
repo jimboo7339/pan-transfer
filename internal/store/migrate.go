@@ -56,6 +56,7 @@ var migrations = []migration{
 	{version: 6, name: "tasks_category_id", up: addColumn("tasks", "category_id", "INTEGER NOT NULL DEFAULT 0")},
 	{version: 7, name: "categories_skip_zero", up: addColumn("task_categories", "skip_zero", "INTEGER NOT NULL DEFAULT 0")},
 	{version: 8, name: "settings_auth_hardening", up: migrateAuthHardening},
+	{version: 9, name: "tasks_dedup_strategy", up: addColumn("tasks", "dedup_strategy", "TEXT NOT NULL DEFAULT 'largest'")},
 }
 
 // CurrentSchemaVersion 返回迁移列表的最新版本号。

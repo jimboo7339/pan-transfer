@@ -1092,6 +1092,9 @@ func (s *Service) SaveTask(ctx context.Context, t *domain.DramaTask) (int64, err
 	if t.SkipHistory != "on" && t.SkipHistory != "off" {
 		t.SkipHistory = "global"
 	}
+	// 去重策略白名单：空值与未知值统一回落到默认「保留最大」，
+	// 避免手改配置导入的非法值在比较函数里走未知分支。
+	t.DedupStrategy = normalizeDedupStrategy(t.DedupStrategy)
 	// 子目录重存模式白名单：该值决定执行器是否删除远端目录，
 	// 拼错的字符串会让行为回落到未知分支，必须在入库前拦住。
 	switch t.UpdateSubdirResaveMode {

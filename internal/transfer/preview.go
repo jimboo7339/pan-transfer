@@ -27,6 +27,7 @@ type PreviewShareInput struct {
 	SortIndex       int    `json:"sort_index"`
 	SavePath        string `json:"save_path"`
 	IgnoreExtension bool   `json:"ignore_extension"`
+	DedupStrategy   string `json:"dedup_strategy"` // largest（默认）/ quality（优先清晰度）
 	UpdateSubdir    string `json:"update_subdir"`
 	StartFID        string `json:"start_fid"`
 }
@@ -41,7 +42,7 @@ type PreviewShareItem struct {
 	UpdatedAt     int64  `json:"updated_at"`
 	Size          int64  `json:"size"`
 	ChildrenCount int    `json:"children_count"`
-	NameSaved     string `json:"name_saved"` // 状态标注：已存在文件名 / 起始及之前 / 重命名冲突（保留最大）
+	NameSaved     string `json:"name_saved"` // 状态标注：已存在文件名 / 起始及之前 / 重命名冲突（保留最大 / 优先清晰度）
 }
 
 // PreviewShareResult 预览结果（来自Trae）
@@ -192,6 +193,7 @@ func previewShareWithDriver(ctx context.Context, drv driver.Driver, in PreviewSh
 	type candidate struct {
 		item       driver.ShareEntry
 		targetName string
+		previewIdx int // 对应的 previewItems 下标，冲突标注时直接定位，避免同名反查标错行
 	}
 	var candidates []candidate
 	previewItems := make([]PreviewShareItem, 0, len(shareItems))
@@ -262,13 +264,14 @@ func previewShareWithDriver(ctx context.Context, drv driver.Driver, in PreviewSh
 			item.NameSaved = saved
 		} else {
 			item.NameRe = targetName
-			candidates = append(candidates, candidate{item: sf, targetName: targetName})
+			candidates = append(candidates, candidate{
+				item: sf, targetName: targetName, previewIdx: len(previewItems),
+			})
 		}
 		previewItems = append(previewItems, item)
 	}
 
-	// 9. 重命名冲突去重：同目标名保留 size 最大 / 更新（来自Trae）
-	// candidate 与 previewItems 下标一一对应，用于冲突标注。
+	// 9. 重命名冲突去重：同目标名保留最优候选（来自Trae；策略可为保留最大 / 优先清晰度）
 	best := make(map[string]int)
 	for idx, c := range candidates {
 		key := c.targetName
@@ -281,8 +284,11 @@ func previewShareWithDriver(ctx context.Context, drv driver.Driver, in PreviewSh
 			continue
 		}
 		prev := candidates[prevIdx]
-		if c.item.Size > prev.item.Size ||
-			(c.item.Size == prev.item.Size && c.item.UpdatedAt > prev.item.UpdatedAt) {
+		if betterDedupCandidate(
+			DedupCandidate{Name: c.item.FileName, Size: c.item.Size, UpdatedAt: c.item.UpdatedAt},
+			DedupCandidate{Name: prev.item.FileName, Size: prev.item.Size, UpdatedAt: prev.item.UpdatedAt},
+			in.DedupStrategy,
+		) {
 			best[key] = idx
 		}
 	}
@@ -290,18 +296,14 @@ func previewShareWithDriver(ctx context.Context, drv driver.Driver, in PreviewSh
 	for _, idx := range best {
 		keepIdx[idx] = true
 	}
+	label := conflictLabel(in.DedupStrategy)
 	for idx, c := range candidates {
 		if keepIdx[idx] {
 			continue
 		}
-		// 找到对应 previewItems 下标并标注冲突（来自Trae）
-		for i := range previewItems {
-			if previewItems[i].NameRe == c.targetName && previewItems[i].NameSaved == "" {
-				previewItems[i].NameSaved = "重命名冲突（保留最大）"
-				previewItems[i].NameRe = ""
-				break
-			}
-		}
+		// 直接用 candidate 记录的previewItems下标标注冲突（来自Trae）
+		previewItems[c.previewIdx].NameSaved = label
+		previewItems[c.previewIdx].NameRe = ""
 	}
 
 	// 10. {I+} 序号分配（来自Trae）

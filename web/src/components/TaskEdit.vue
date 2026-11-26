@@ -54,6 +54,7 @@ const form = reactive({
   pattern: '',
   replace: '',
   ignore_extension: true,
+  dedup_strategy: 'largest', // largest=保留最大 / quality=优先清晰度
   run_week: '',
   run_time: '',
   run_cron: '',
@@ -173,6 +174,7 @@ async function open(task) {
       pattern: task.pattern,
       replace: task.replace,
       ignore_extension: task.ignore_extension,
+      dedup_strategy: task.dedup_strategy || 'largest',
       run_week: task.run_week,
       run_time: task.run_time,
       run_cron: task.run_cron || '',
@@ -196,7 +198,7 @@ async function open(task) {
     Object.assign(form, {
       id: 0, task_name: '', account_id: accounts.value[0]?.id || 0,
       links: [''], save_path: '', pattern: '', replace: '',
-      ignore_extension: true, run_week: '', run_time: '', run_cron: '', end_date: '',
+      ignore_extension: true, dedup_strategy: 'largest', run_week: '', run_time: '', run_cron: '', end_date: '',
       update_subdir: '', start_fid: '', category_id: 0, sort_index: 1, skip_history: 'global',
       update_subdir_resave_mode: '',
       run_mode: 'manual', status: 'running',
@@ -261,6 +263,7 @@ function openPreview(i = 0) {
     sort_index: form.sort_index,
     save_path: form.save_path,
     ignore_extension: form.ignore_extension,
+    dedup_strategy: form.dedup_strategy,
     update_subdir: form.update_subdir,
     start_fid: form.start_fid,
   })
@@ -426,6 +429,14 @@ async function save() {
               <input type="checkbox" v-model="form.ignore_extension" />
               忽略扩展名去重（mp4 / mkv 有一个即视为已有，不再转存另一个）
             </label>
+            <div class="field mt-16">
+              <div class="field-label">同集多清晰度去重</div>
+              <select class="select" v-model="form.dedup_strategy">
+                <option value="largest">保留最大（默认，按文件大小）</option>
+                <option value="quality">优先清晰度（4K/2160p &gt; 2K/1440p &gt; 1080p &gt; 720p，同档再比大小，忽略大小写）</option>
+              </select>
+              <div class="field-hint">同一集存在多个清晰度时选谁：默认按体积，勾选"优先清晰度"后按 4K/2K/1080p 档位优先，同档位再比大小。</div>
+            </div>
             <div class="form-row mt-16">
               <div class="field" style="margin-bottom: 0">
                 <div class="field-label">子目录同步正则（可选）</div>

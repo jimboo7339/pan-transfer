@@ -268,7 +268,7 @@ func ParseAccountConfig(raw string) AccountConfig {
 // ---------- 追剧任务 ----------
 
 const taskCols = `id, task_name, account_id, share_url, share_links, save_path, pattern, replace,
-	ignore_extension, run_week, run_time, end_date, update_subdir, update_subdir_resave_mode,
+	ignore_extension, dedup_strategy, run_week, run_time, end_date, update_subdir, update_subdir_resave_mode,
 	start_fid, sort_index, skip_history, status, last_run_at, last_run_status, last_run_message,
 	last_tree_summary, created_at, updated_at, run_mode, run_cron, category_id`
 
@@ -277,7 +277,7 @@ func scanTask(row interface{ Scan(...any) error }) (*domain.DramaTask, error) {
 	var ignoreExt, status int
 	var created, updated string
 	err := row.Scan(&t.ID, &t.TaskName, &t.AccountID, &t.ShareURL, &t.ShareLinks, &t.SavePath,
-		&t.Pattern, &t.Replace, &ignoreExt, &t.RunWeek, &t.RunTime, &t.EndDate,
+		&t.Pattern, &t.Replace, &ignoreExt, &t.DedupStrategy, &t.RunWeek, &t.RunTime, &t.EndDate,
 		&t.UpdateSubdir, &t.UpdateSubdirResaveMode, &t.StartFID, &t.SortIndex, &t.SkipHistory,
 		&status, &t.LastRunAt, &t.LastRunStatus, &t.LastRunMessage, &t.LastTreeSummary,
 		&created, &updated, &t.RunMode, &t.RunCron, &t.CategoryID)
@@ -285,6 +285,9 @@ func scanTask(row interface{ Scan(...any) error }) (*domain.DramaTask, error) {
 		return nil, err
 	}
 	t.IgnoreExtension = ignoreExt != 0
+	if strings.TrimSpace(t.DedupStrategy) == "" {
+		t.DedupStrategy = "largest"
+	}
 	if status != 0 {
 		t.Status = "running"
 	} else {
@@ -300,10 +303,10 @@ func (s *Store) CreateTask(ctx context.Context, t *domain.DramaTask) (int64, err
 	now := nowStr()
 	res, err := s.db.ExecContext(ctx, `INSERT INTO tasks (
 		task_name, account_id, share_url, share_links, save_path, pattern, replace, ignore_extension,
-		run_week, run_time, end_date, update_subdir, update_subdir_resave_mode, start_fid, sort_index,
-		skip_history, status, run_mode, run_cron, category_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		dedup_strategy, run_week, run_time, end_date, update_subdir, update_subdir_resave_mode, start_fid, sort_index,
+		skip_history, status, run_mode, run_cron, category_id, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		t.TaskName, t.AccountID, t.ShareURL, t.ShareLinks, t.SavePath, t.Pattern, t.Replace, boolInt(t.IgnoreExtension),
-		t.RunWeek, t.RunTime, t.EndDate, t.UpdateSubdir, t.UpdateSubdirResaveMode, t.StartFID, t.SortIndex,
+		t.DedupStrategy, t.RunWeek, t.RunTime, t.EndDate, t.UpdateSubdir, t.UpdateSubdirResaveMode, t.StartFID, t.SortIndex,
 		t.SkipHistory, boolInt(t.Status != "paused"), t.RunMode, t.RunCron, t.CategoryID, now, now)
 	if err != nil {
 		return 0, err
@@ -315,10 +318,10 @@ func (s *Store) CreateTask(ctx context.Context, t *domain.DramaTask) (int64, err
 func (s *Store) UpdateTask(ctx context.Context, t *domain.DramaTask) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE tasks SET
 		task_name=?, account_id=?, share_url=?, share_links=?, save_path=?, pattern=?, replace=?,
-		ignore_extension=?, run_week=?, run_time=?, end_date=?, update_subdir=?, update_subdir_resave_mode=?,
+		ignore_extension=?, dedup_strategy=?, run_week=?, run_time=?, end_date=?, update_subdir=?, update_subdir_resave_mode=?,
 		start_fid=?, sort_index=?, skip_history=?, status=?, run_mode=?, run_cron=?, category_id=?, updated_at=? WHERE id=?`,
 		t.TaskName, t.AccountID, t.ShareURL, t.ShareLinks, t.SavePath, t.Pattern, t.Replace,
-		boolInt(t.IgnoreExtension), t.RunWeek, t.RunTime, t.EndDate, t.UpdateSubdir, t.UpdateSubdirResaveMode,
+		boolInt(t.IgnoreExtension), t.DedupStrategy, t.RunWeek, t.RunTime, t.EndDate, t.UpdateSubdir, t.UpdateSubdirResaveMode,
 		t.StartFID, t.SortIndex, t.SkipHistory, boolInt(t.Status != "paused"), t.RunMode, t.RunCron, t.CategoryID, nowStr(), t.ID)
 	return err
 }

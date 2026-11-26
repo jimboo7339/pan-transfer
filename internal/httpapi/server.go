@@ -169,7 +169,7 @@ func (s *Server) routes() {
 	//   - logout：必须校验 Origin。早先 handleLogout 完全裸奔，
 	//     任何人（无需登录）POST 一次就会 bumpSessionVersion，
 	//     把用户所有已签发 token 全部作废 —— 一个未鉴权的状态变更端点，
-//     还能被任意网页通过 form POST 触发（CSRF）。
+	//     还能被任意网页通过 form POST 触发（CSRF）。
 	m.HandleFunc("POST /api/auth/login", s.handleLogin)
 	m.HandleFunc("POST /api/auth/logout", s.handleLogout)
 	m.HandleFunc("GET /api/auth/status", s.handleAuthStatus)
@@ -941,6 +941,7 @@ type taskIn struct {
 	Pattern         string   `json:"pattern"`
 	Replace         string   `json:"replace"`
 	IgnoreExtension bool     `json:"ignore_extension"`
+	DedupStrategy   string   `json:"dedup_strategy"` // largest（默认）/ quality（优先清晰度）
 	RunWeek         string   `json:"run_week"`
 	RunTime         string   `json:"run_time"`
 	EndDate         string   `json:"end_date"`
@@ -968,6 +969,7 @@ func (in *taskIn) toTask() *domain.DramaTask {
 		Pattern:                in.Pattern,
 		Replace:                in.Replace,
 		IgnoreExtension:        in.IgnoreExtension,
+		DedupStrategy:          in.DedupStrategy,
 		RunWeek:                in.RunWeek,
 		RunTime:                in.RunTime,
 		EndDate:                in.EndDate,
@@ -995,6 +997,7 @@ func taskOut(t *domain.DramaTask) map[string]any {
 		"pattern":                   t.Pattern,
 		"replace":                   t.Replace,
 		"ignore_extension":          t.IgnoreExtension,
+		"dedup_strategy":            t.DedupStrategy,
 		"run_week":                  t.RunWeek,
 		"run_time":                  t.RunTime,
 		"end_date":                  t.EndDate,

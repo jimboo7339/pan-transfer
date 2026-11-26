@@ -8,33 +8,34 @@ import (
 // DramaTask 追剧转存任务（来自Trae）。
 // 字段语义与 CASX tasks 表对齐，仅取追剧相关字段。
 type DramaTask struct {
-	ID                      int64
-	TaskName                string
-	AccountID               int64
-	ShareURL                string // 当前生效的分享链接（运行时由服务从 ShareLinks 中选出写入）
-	ShareLinks              string // JSON 数组：多源链接，按顺序轮换；单链接场景与 ShareURL 等价
-	SavePath                string
-	Pattern                 string
-	Replace                 string
-	IgnoreExtension         bool
-	RunWeek                 string // 逗号分隔的 1-7，留空表示每天都跑（来自Trae）
-	RunTime                 string // "HH:MM" 自动运行时刻（旧字段，兼容保留；新任务用 RunCron）
-	RunCron                 string // 5 字段 cron 表达式，例如 "0 */2 * * *" = 每 2 小时；旧数据留空由 RunWeek+RunTime 合成
-	EndDate                 string // YYYY-MM-DD
-	UpdateSubdir            string
-	UpdateSubdirResaveMode  string
-	StartFID                string
-	CategoryID              int64  // 任务分类（0=未分类）；分类可配置转存完成后的回调
-	SortIndex               int
-	SkipHistory             string // global/on/off：是否按转存历史跳过已保存文件
-	RunMode                 string // manual/global/custom：manual=仅手动，global=用全局调度，custom=用本任务 RunWeek/RunTime
-	Status                  string // running/paused
-	LastRunAt               string
-	LastRunStatus           string
-	LastRunMessage          string
-	LastTreeSummary         string
-	CreatedAt               time.Time
-	UpdatedAt               time.Time
+	ID                     int64
+	TaskName               string
+	AccountID              int64
+	ShareURL               string // 当前生效的分享链接（运行时由服务从 ShareLinks 中选出写入）
+	ShareLinks             string // JSON 数组：多源链接，按顺序轮换；单链接场景与 ShareURL 等价
+	SavePath               string
+	Pattern                string
+	Replace                string
+	IgnoreExtension        bool
+	DedupStrategy          string // 同目标名冲突去重策略：largest（默认，保留最大）/ quality（优先清晰度）
+	RunWeek                string // 逗号分隔的 1-7，留空表示每天都跑（来自Trae）
+	RunTime                string // "HH:MM" 自动运行时刻（旧字段，兼容保留；新任务用 RunCron）
+	RunCron                string // 5 字段 cron 表达式，例如 "0 */2 * * *" = 每 2 小时；旧数据留空由 RunWeek+RunTime 合成
+	EndDate                string // YYYY-MM-DD
+	UpdateSubdir           string
+	UpdateSubdirResaveMode string
+	StartFID               string
+	CategoryID             int64 // 任务分类（0=未分类）；分类可配置转存完成后的回调
+	SortIndex              int
+	SkipHistory            string // global/on/off：是否按转存历史跳过已保存文件
+	RunMode                string // manual/global/custom：manual=仅手动，global=用全局调度，custom=用本任务 RunWeek/RunTime
+	Status                 string // running/paused
+	LastRunAt              string
+	LastRunStatus          string
+	LastRunMessage         string
+	LastTreeSummary        string
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 }
 
 // DramaTaskRun 追剧任务执行历史（来自Trae）
